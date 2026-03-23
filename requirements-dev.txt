@@ -23,6 +23,6 @@ django-extensions==3.2.3
 django-debug-toolbar==4.2.0
 ipython==8.19.0
 
-# Security (updated to compatible versions)
+# Security
 bandit==1.7.5
-safety==3.1.1
+# safety removed due to packaging conflicts - install separately if needed: pip install safety
