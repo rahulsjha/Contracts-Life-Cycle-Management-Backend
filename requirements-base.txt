@@ -22,30 +22,7 @@ boto3==1.34.22
 
 # Server
 gunicorn==21.2.0
-
-# Task Queue
-celery==5.3.6
-redis==5.0.1
-
-# Document Processing
-python-docx==1.1.0
-PyPDF2==3.0.1
-reportlab==4.4.5
-pdf2image==1.17.0
-pypdf==6.4.0
-Pillow==10.1.0
-pytesseract==0.3.10
-
-# AI & LLM
-google-generativeai==0.5.4
-voyageai==0.2.2
-numpy==1.26.3
-
-# Templating
-Jinja2==3.1.4
-
-# Observability
-prometheus-client==0.20.0
+packaging>=22.0
 opentelemetry-api==1.29.0
 opentelemetry-sdk==1.29.0
 opentelemetry-instrumentation==0.50b0
