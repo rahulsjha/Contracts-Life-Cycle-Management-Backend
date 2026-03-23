@@ -1,0 +1,31 @@
+# Base dependencies
+-r requirements-base.txt
+
+# Testing
+pytest==7.4.4
+pytest-django==4.7.0
+pytest-cov==4.1.0
+factory-boy==3.3.0
+faker==22.6.0
+
+# Code Quality
+black==24.1.1
+flake8==7.0.0
+isort==5.13.2
+mypy==1.8.0
+django-stubs==4.2.7
+djangorestframework-stubs==3.14.4
+
+# Development Server
+django-extensions==3.2.3
+
+# Debugging
+django-debug-toolbar==4.2.0
+ipython==8.19.0
+
+# Security
+bandit==1.7.5
+safety==2.3.5
+
+# Documentation
+sphinx==7.2.6

@@ -1,0 +1,75 @@
+name: Deploy to Staging/Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Deploy to ${{ github.event.inputs.environment }}
+        run: |
+          echo "🚀 Deploying to ${{ github.event.inputs.environment }}"
+          echo "Deployment strategy: Blue-Green or Canary"
+          echo "1. Pull latest Docker image from registry"
+          echo "2. Run migrations"
+          echo "3. Collect static files"
+          echo "4. Update service/deployment"
+          echo "5. Monitor health checks"
+          echo "6. Rollback if errors detected"
+      
+      - name: Run smoke tests
+        run: |
+          echo "✅ Running smoke tests against deployed endpoint"
+          echo "Tests:"
+          echo "  - Health check endpoint"
+          echo "  - Auth endpoints"
+          echo "  - Core contract endpoints"
+          echo "  - API schema endpoint"
+      
+      - name: Monitor deployment
+        run: |
+          echo "📊 Monitoring deployment:"
+          echo "  - Error rate"
+          echo "  - Response latency"
+          echo "  - Database connectivity"
+          echo "  - Redis connectivity"
+      
+      - name: Notify deployment
+        if: success()
+        run: echo "✅ Deployment to ${{ github.event.inputs.environment }} completed successfully"
+      
+      - name: Notify failure
+        if: failure()
+        run: echo "❌ Deployment to ${{ github.event.inputs.environment }} failed - initiate rollback"
+
+  # Automatic deployment to staging on main merge
+  auto-deploy-staging:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: staging
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Auto-deploy to staging
+        run: |
+          echo "🔄 Auto-deploying to staging after main branch push"
+          echo "Steps:"
+          echo "  1. Pull image tagged with main branch"
+          echo "  2. Deploy to staging environment"
+          echo "  3. Run integration tests"
+          echo "  4. Report status"

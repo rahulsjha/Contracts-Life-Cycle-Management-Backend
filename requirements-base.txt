@@ -1,0 +1,54 @@
+# Core Django
+Django==5.0
+djangorestframework==3.14.0
+djangorestframework-simplejwt==5.3.0
+drf-spectacular==0.27.2
+
+# Database
+psycopg2-binary==2.9.10
+pgvector==0.2.4
+
+# Environment & Configuration
+python-dotenv==1.0.0
+setuptools>=65.0.0,<81
+
+# API & HTTP
+requests==2.32.3
+PyJWT==2.8.0
+django-cors-headers==4.3.1
+
+# Cloud & Storage
+boto3==1.34.22
+
+# Server
+gunicorn==21.2.0
+
+# Task Queue
+celery==5.3.6
+redis==5.0.1
+
+# Document Processing
+python-docx==1.1.0
+PyPDF2==3.0.1
+reportlab==4.4.5
+pdf2image==1.17.0
+pypdf==6.4.0
+Pillow==10.1.0
+pytesseract==0.3.10
+
+# AI & LLM
+google-generativeai==0.5.4
+voyageai==0.2.2
+numpy==1.26.3
+
+# Templating
+Jinja2==3.1.4
+
+# Observability
+prometheus-client==0.20.0
+opentelemetry-api==1.29.0
+opentelemetry-sdk==1.29.0
+opentelemetry-instrumentation==0.50b0
+opentelemetry-instrumentation-django==0.50b0
+opentelemetry-instrumentation-requests==0.50b0
+opentelemetry-instrumentation-psycopg2==0.50b0
