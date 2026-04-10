@@ -1,0 +1,6 @@
+#!/Users/vishaljha/Contracts-Life-Cycle-Management-Backend/.venv/bin/python3
+import sys
+from celery.__main__ import main
+if __name__ == '__main__':
+    sys.argv[0] = sys.argv[0].removesuffix('.exe')
+    sys.exit(main())

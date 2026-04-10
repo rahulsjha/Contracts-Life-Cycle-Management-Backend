@@ -46,6 +46,26 @@ class ReviewContract(models.Model):
         ('failed', 'Failed'),
     ]
 
+    REVIEW_STATUS_CHOICES = [
+        ('pending_review', 'Pending Review'),
+        ('accepted', 'Accepted'),
+        ('rejected', 'Rejected'),
+        ('flags_raised', 'Flags Raised'),
+    ]
+
+    CONTRACT_TYPE_CHOICES = [
+        ('nda', 'Non-Disclosure Agreement'),
+        ('service_agreement', 'Service Agreement'),
+        ('employment', 'Employment Agreement'),
+        ('purchase', 'Purchase Agreement'),
+        ('license', 'License Agreement'),
+        ('lease', 'Lease Agreement'),
+        ('partnership', 'Partnership Agreement'),
+        ('loan', 'Loan Agreement'),
+        ('vendor', 'Vendor Agreement'),
+        ('unknown', 'Unknown'),
+    ]
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
     tenant_id = models.UUIDField(db_index=True)
@@ -59,6 +79,8 @@ class ReviewContract(models.Model):
     r2_key = models.CharField(max_length=1024, db_index=True)
 
     status = models.CharField(max_length=32, choices=STATUS_CHOICES, default='uploaded')
+    review_status = models.CharField(max_length=32, choices=REVIEW_STATUS_CHOICES, default='pending_review', db_index=True)
+    contract_type = models.CharField(max_length=50, choices=CONTRACT_TYPE_CHOICES, default='unknown', db_index=True)
     error_message = models.TextField(blank=True, default='')
 
     extracted_text = models.TextField(blank=True, default='')
@@ -66,9 +88,12 @@ class ReviewContract(models.Model):
 
     analysis = models.JSONField(default=dict, blank=True)
     review_text = models.TextField(blank=True, default='')
+    review_notes = models.TextField(blank=True, default='')  # Reviewer's notes
+    reviewer_id = models.UUIDField(null=True, blank=True)  # Person who reviewed/accepted/rejected
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         db_table = 'review_contracts'

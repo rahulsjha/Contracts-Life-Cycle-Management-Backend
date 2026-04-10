@@ -19,7 +19,9 @@ from .models import ReviewContract
 from .serializers import (
     ReviewContractCreateSerializer,
     ReviewContractDetailSerializer,
-    ReviewContractSerializer,
+    ReviewContractListSerializer,
+    ReviewAcceptanceSerializer,
+    ReviewRejectionSerializer,
 )
 from .services import (
     attach_clause_matches,
@@ -29,6 +31,7 @@ from .services import (
     gemini_extract_and_review,
     normalize_analysis_shape,
     naive_fallback_extract,
+    detect_contract_type,
 )
 
 
@@ -56,7 +59,9 @@ class ReviewContractViewSet(viewsets.ModelViewSet):
     def get_serializer_class(self):
         if self.action == 'retrieve':
             return ReviewContractDetailSerializer
-        return ReviewContractSerializer
+        elif self.action == 'list':
+            return ReviewContractListSerializer
+        return ReviewContractListSerializer
 
     def create(self, request, *args, **kwargs):
         user = request.user
@@ -126,20 +131,23 @@ class ReviewContractViewSet(viewsets.ModelViewSet):
                 )
             rc.extracted_text = text
 
+            # Detect contract type
+            contract_type = detect_contract_type(text, rc.original_filename)
+            rc.contract_type = contract_type
+
             embedding = generate_voyage_embedding(text)
             if embedding is not None:
                 rc.embedding = embedding
 
-            analysis, review_text = gemini_extract_and_review(text, filename=rc.original_filename)
+            analysis, review_text, gemini_error = gemini_extract_and_review(text, filename=rc.original_filename)
+            if gemini_error:
+                # Non-fatal: we can still fall back to basic extraction.
+                rc.error_message = gemini_error
+
             if not analysis:
                 analysis = naive_fallback_extract(text)
-
-                # Surface a helpful warning when we are in basic-mode extraction.
-                if not (getattr(settings, 'GEMINI_API_KEY', '') or '').strip():
-                    rc.error_message = (
-                        'AI extraction is not configured (GEMINI_API_KEY is missing). '
-                        'Showing basic extraction only; results may be limited.'
-                    )
+                if not (rc.error_message or '').strip():
+                    rc.error_message = 'AI extraction returned no structured data. Showing basic extraction only; results may be limited.'
 
             analysis = normalize_analysis_shape(analysis or {})
 
@@ -149,6 +157,8 @@ class ReviewContractViewSet(viewsets.ModelViewSet):
                 analysis['_meta'].update({
                     'text_chars': len(text or ''),
                     'gemini_configured': bool((getattr(settings, 'GEMINI_API_KEY', '') or '').strip()),
+                    'gemini_success': bool(analysis) and not bool(gemini_error),
+                    'gemini_error': (gemini_error or '').strip() or None,
                     'voyage_configured': bool((getattr(settings, 'VOYAGE_API_KEY', '') or '').strip()),
                 })
 
@@ -160,9 +170,10 @@ class ReviewContractViewSet(viewsets.ModelViewSet):
 
             rc.analysis = analysis or {}
             rc.review_text = review_text or ''
+            rc.review_status = 'pending_review'  # Always start as pending review
 
             rc.status = 'ready'
-            rc.save(update_fields=['status', 'error_message', 'extracted_text', 'embedding', 'analysis', 'review_text', 'updated_at'])
+            rc.save(update_fields=['status', 'error_message', 'extracted_text', 'embedding', 'analysis', 'review_text', 'contract_type', 'review_status', 'updated_at'])
 
         except Exception as e:
             rc.status = 'failed'
@@ -298,6 +309,86 @@ class ReviewContractViewSet(viewsets.ModelViewSet):
 
         filename = f"{(rc.title or 'lawflow_report').strip().replace(' ', '_')}_review.pdf"
         return FileResponse(buffer, as_attachment=True, filename=filename, content_type='application/pdf')
+
+    @action(detail=True, methods=['post'], url_path='accept')
+    def accept_review(self, request, pk=None):
+        """Accept the reviewed contract"""
+        rc = self.get_object()
+        user = request.user
+        
+        serializer = ReviewAcceptanceSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        notes = serializer.validated_data.get('notes', '').strip()
+        
+        rc.review_status = 'accepted'
+        rc.review_notes = notes
+        rc.reviewer_id = getattr(user, 'user_id', None)
+        rc.reviewed_at = timezone.now()
+        rc.save(update_fields=['review_status', 'review_notes', 'reviewer_id', 'reviewed_at', 'updated_at'])
+        
+        return Response({
+            'success': True,
+            'message': 'Contract accepted successfully',
+            'review_contract': ReviewContractDetailSerializer(rc).data
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], url_path='reject')
+    def reject_review(self, request, pk=None):
+        """Reject the reviewed contract with reasons"""
+        rc = self.get_object()
+        user = request.user
+        
+        serializer = ReviewRejectionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        notes = serializer.validated_data.get('notes', '').strip()
+        suggested_changes = serializer.validated_data.get('suggested_changes', [])
+        
+        # Store rejection reason and suggested changes in review_notes
+        rejection_text = f"REJECTED - Reason: {notes}"
+        if suggested_changes:
+            rejection_text += f"\n\nSuggested Changes:\n" + "\n".join(f"- {change}" for change in suggested_changes)
+        
+        rc.review_status = 'rejected'
+        rc.review_notes = rejection_text
+        rc.reviewer_id = getattr(user, 'user_id', None)
+        rc.reviewed_at = timezone.now()
+        rc.save(update_fields=['review_status', 'review_notes', 'reviewer_id', 'reviewed_at', 'updated_at'])
+        
+        return Response({
+            'success': True,
+            'message': 'Contract rejected successfully',
+            'review_contract': ReviewContractDetailSerializer(rc).data
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], url_path='flag-issues')
+    def flag_issues(self, request, pk=None):
+        """Flag issues in the contract for review"""
+        rc = self.get_object()
+        user = request.user
+        
+        issues = request.data.get('issues', [])
+        if not issues:
+            return Response({
+                'success': False,
+                'error': 'Please provide at least one issue'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        notes = f"Issues Flagged: {len(issues)} issue(s) identified\n"
+        notes += "\n".join(f"- {issue}" for issue in issues)
+        
+        rc.review_status = 'flags_raised'
+        rc.review_notes = notes
+        rc.reviewer_id = getattr(user, 'user_id', None)
+        rc.reviewed_at = timezone.now()
+        rc.save(update_fields=['review_status', 'review_notes', 'reviewer_id', 'reviewed_at', 'updated_at'])
+        
+        return Response({
+            'success': True,
+            'message': f'Flagged {len(issues)} issue(s)',
+            'review_contract': ReviewContractDetailSerializer(rc).data
+        }, status=status.HTTP_200_OK)
 
     def destroy(self, request, *args, **kwargs):
         rc = self.get_object()

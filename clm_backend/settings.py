@@ -499,19 +499,33 @@ CORS_ALLOW_HEADERS = [
     'accept',
     'accept-encoding',
     'authorization',
+    'baggage',
     'content-type',
     'dnt',
     'origin',
+    'sentry-trace',
     'user-agent',
     'x-csrftoken',
     'x-requested-with',
     'x-api-key',
     'x-device-id',
+    'x-tenant-id',
+    'x-tenant',
 ]
+
+# Optional: allow all origins (useful for temporary debugging only).
+# With CORS_ALLOW_CREDENTIALS=True, django-cors-headers will echo the request Origin.
+CORS_ALLOW_ALL_ORIGINS = os.getenv('CORS_ALLOW_ALL_ORIGINS', 'False').strip().lower() in (
+    '1', 'true', 'yes', 'y', 'on'
+)
 
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '')
 VOYAGE_API_KEY = os.getenv('VOYAGE_API_KEY', '')
-VOYAGE_CONTEXT = os.getenv('VOYAGE_CONTEXT', '') 
+VOYAGE_CONTEXT = os.getenv('VOYAGE_CONTEXT', '')
+
+# Use gemini-2.5-flash-lite by default (better availability for many dev setups).
+# Override via env: GEMINI_REVIEW_MODEL=...
+GEMINI_REVIEW_MODEL = os.getenv('GEMINI_REVIEW_MODEL', 'gemini-2.5-flash-lite')
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
 SECURE_SSL_REDIRECT = os.getenv('SECURE_SSL_REDIRECT', 'False').strip().lower() in ('1', 'true', 'yes', 'y', 'on')
