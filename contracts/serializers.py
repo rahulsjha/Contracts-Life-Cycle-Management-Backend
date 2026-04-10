@@ -402,6 +402,12 @@ class FinalizedContractSerializer(serializers.Serializer):
     expiration_date = serializers.DateField(required=False)
     additional_metadata = serializers.JSONField(required=False)
 
+class ContractSummaryEmailRequestSerializer(serializers.Serializer):
+    """Request payload for sending summary/reminder emails from the dashboard."""
+
+    kind = serializers.ChoiceField(choices=['overdue', 'renewal'])
+    recipient_email = serializers.EmailField()
+    recipient_name = serializers.CharField(required=False, allow_blank=True, default='')
 # ========== SIGNNOW SERIALIZERS ==========
 
 class SignerSerializer(serializers.ModelSerializer):

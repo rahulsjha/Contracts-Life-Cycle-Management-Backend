@@ -523,9 +523,8 @@ GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '')
 VOYAGE_API_KEY = os.getenv('VOYAGE_API_KEY', '')
 VOYAGE_CONTEXT = os.getenv('VOYAGE_CONTEXT', '')
 
-# Use gemini-2.5-flash-lite by default (better availability for many dev setups).
-# Override via env: GEMINI_REVIEW_MODEL=...
-GEMINI_REVIEW_MODEL = os.getenv('GEMINI_REVIEW_MODEL', 'gemini-2.5-flash-lite')
+# Use gemini-2.5-flash instead of 2.0-flash to avoid quota issues
+GEMINI_REVIEW_MODEL = os.getenv('GEMINI_REVIEW_MODEL', 'gemini-2.5-flash') 
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
 SECURE_SSL_REDIRECT = os.getenv('SECURE_SSL_REDIRECT', 'False').strip().lower() in ('1', 'true', 'yes', 'y', 'on')

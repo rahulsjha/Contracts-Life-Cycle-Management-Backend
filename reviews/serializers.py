@@ -42,7 +42,6 @@ class ReviewContractListSerializer(serializers.ModelSerializer):
             'size_bytes',
             'status',
             'review_status',
-            'error_message',
             'analysis_summary',
             'created_at',
             'updated_at',
@@ -57,8 +56,6 @@ class ReviewContractListSerializer(serializers.ModelSerializer):
                 'risk_score': summary.get('risk_score'),
                 'risk_level': summary.get('risk_level'),
                 'clauses_count': summary.get('clauses_count'),
-                'obligations_count': summary.get('obligations_count'),
-                'constraints_count': summary.get('constraints_count'),
             }
         return None
 
@@ -68,16 +65,9 @@ class ReviewContractDetailSerializer(serializers.ModelSerializer):
     analysis_summary = serializers.SerializerMethodField()
     high_risk_clauses = serializers.SerializerMethodField()
     medium_risk_clauses = serializers.SerializerMethodField()
-    clauses = serializers.SerializerMethodField()
     suggestions = serializers.SerializerMethodField()
     insights = serializers.SerializerMethodField()
     obligations = serializers.SerializerMethodField()
-    constraints = serializers.SerializerMethodField()
-    parties = serializers.SerializerMethodField()
-    dates = serializers.SerializerMethodField()
-    values = serializers.SerializerMethodField()
-    jurisdiction = serializers.SerializerMethodField()
-    summary = serializers.SerializerMethodField()
 
     class Meta:
         model = ReviewContract
@@ -93,18 +83,11 @@ class ReviewContractDetailSerializer(serializers.ModelSerializer):
             'review_status',
             'error_message',
             'analysis_summary',
-            'parties',
-            'dates',
-            'values',
-            'jurisdiction',
-            'summary',
-            'clauses',
             'high_risk_clauses',
             'medium_risk_clauses',
             'suggestions',
             'insights',
             'obligations',
-            'constraints',
             'review_text',
             'review_notes',
             'reviewer_id',
@@ -138,11 +121,6 @@ class ReviewContractDetailSerializer(serializers.ModelSerializer):
         clauses = analysis.get('clauses', [])
         medium_risk = [c for c in clauses if isinstance(c, dict) and c.get('risk') == 'medium']
         return medium_risk[:10]  # Limit to top 10
-
-    def get_clauses(self, obj):
-        """Get all extracted clauses (may be empty if AI extraction is not configured)."""
-        analysis = obj.analysis or {}
-        return analysis.get('clauses', [])
 
     def get_suggestions(self, obj):
         """Get professional suggestions for review decision"""
@@ -190,31 +168,6 @@ class ReviewContractDetailSerializer(serializers.ModelSerializer):
         """Get all obligations from the contract"""
         analysis = obj.analysis or {}
         return analysis.get('obligations', [])
-
-    def get_constraints(self, obj):
-        """Get all constraints from the contract"""
-        analysis = obj.analysis or {}
-        return analysis.get('constraints', [])
-
-    def get_parties(self, obj):
-        analysis = obj.analysis or {}
-        return analysis.get('parties', [])
-
-    def get_dates(self, obj):
-        analysis = obj.analysis or {}
-        return analysis.get('dates', [])
-
-    def get_values(self, obj):
-        analysis = obj.analysis or {}
-        return analysis.get('values', [])
-
-    def get_jurisdiction(self, obj):
-        analysis = obj.analysis or {}
-        return analysis.get('jurisdiction')
-
-    def get_summary(self, obj):
-        analysis = obj.analysis or {}
-        return analysis.get('summary', '')
 
 
 class ReviewContractCreateSerializer(serializers.Serializer):

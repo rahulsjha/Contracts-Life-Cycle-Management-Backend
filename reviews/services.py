@@ -17,9 +17,6 @@ from .models import ClauseLibraryItem
 logger = logging.getLogger(__name__)
 
 
-_VOYAGE_DISABLED_DUE_TO_AUTH = False
-
-
 MAX_EXTRACT_CHARS = 120_000
 
 
@@ -212,10 +209,6 @@ def extract_text_with_ocr_fallback(file_bytes: bytes, filename: str) -> str:
 
 
 def generate_voyage_embedding(text: str) -> Optional[list]:
-    global _VOYAGE_DISABLED_DUE_TO_AUTH
-    if _VOYAGE_DISABLED_DUE_TO_AUTH:
-        return None
-
     api_key = (settings.VOYAGE_API_KEY or '').strip()
     if not api_key:
         return None
@@ -233,11 +226,7 @@ def generate_voyage_embedding(text: str) -> Optional[list]:
             timeout=25,
         )
         if resp.status_code >= 400:
-            if resp.status_code in (401, 403):
-                _VOYAGE_DISABLED_DUE_TO_AUTH = True
-                logger.warning('Voyage embedding disabled due to auth failure (%s). Fix VOYAGE_API_KEY to re-enable.', resp.status_code)
-            else:
-                logger.warning('Voyage embedding failed: %s %s', resp.status_code, resp.text[:500])
+            logger.warning('Voyage embedding failed: %s %s', resp.status_code, resp.text[:500])
             return None
 
         data = resp.json() or {}
@@ -319,16 +308,16 @@ EXTRACTION_SCHEMA_HINT = {
 }
 
 
-def gemini_extract_and_review(text: str, *, filename: str = '') -> Tuple[dict, str, Optional[str]]:
+def gemini_extract_and_review(text: str, *, filename: str = '') -> Tuple[dict, str]:
     api_key = (settings.GEMINI_API_KEY or '').strip()
     if not api_key:
-        return ({}, '', 'AI extraction is not configured (GEMINI_API_KEY is missing).')
+        return ({}, '')
 
     try:
         import google.generativeai as genai
 
         genai.configure(api_key=api_key)
-        model_name = (getattr(settings, 'GEMINI_REVIEW_MODEL', None) or '').strip() or 'gemini-2.5-flash-lite'
+        model_name = getattr(settings, 'GEMINI_REVIEW_MODEL', None) or 'gemini-2.0-flash'
         model = genai.GenerativeModel(model_name)
 
         prompt = (
@@ -347,31 +336,17 @@ def gemini_extract_and_review(text: str, *, filename: str = '') -> Tuple[dict, s
             f"{(text or '')[:25000]}"
         )
 
-        # Prefer structured JSON responses when supported.
-        try:
-            resp = model.generate_content(
-                prompt,
-                generation_config={
-                    'response_mime_type': 'application/json',
-                    'temperature': 0.2,
-                },
-            )
-        except TypeError:
-            # Older SDK versions may not support generation_config.
-            resp = model.generate_content(prompt)
+        resp = model.generate_content(prompt)
         out_text = getattr(resp, 'text', None) or ''
-        data = _safe_json_from_text(out_text)
-        if not isinstance(data, dict) or not data:
-            return ({}, '', 'AI extraction returned invalid JSON; showing basic extraction only.')
+        data = _safe_json_from_text(out_text) or {}
         review_text = ''
         if isinstance(data, dict):
             review_text = str(data.get('review_text') or '')
-        return (data, review_text, None)
+        return (data if isinstance(data, dict) else {}, review_text)
 
     except Exception as e:
         logger.exception('Gemini extract/review failed: %s', e)
-        # Keep the user-visible error short and stable (no stack traces / secrets).
-        return ({}, '', 'AI extraction failed (Gemini). Showing basic extraction only.')
+        return ({}, '')
 
 
 def normalize_analysis_shape(analysis: dict) -> dict:

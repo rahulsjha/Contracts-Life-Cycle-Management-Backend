@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import os
 import uuid
+import mimetypes
 
 from django.http import HttpResponse, FileResponse
 from django.utils import timezone
@@ -139,15 +140,16 @@ class ReviewContractViewSet(viewsets.ModelViewSet):
             if embedding is not None:
                 rc.embedding = embedding
 
-            analysis, review_text, gemini_error = gemini_extract_and_review(text, filename=rc.original_filename)
-            if gemini_error:
-                # Non-fatal: we can still fall back to basic extraction.
-                rc.error_message = gemini_error
-
+            analysis, review_text = gemini_extract_and_review(text, filename=rc.original_filename)
             if not analysis:
                 analysis = naive_fallback_extract(text)
-                if not (rc.error_message or '').strip():
-                    rc.error_message = 'AI extraction returned no structured data. Showing basic extraction only; results may be limited.'
+
+                # Surface a helpful warning when we are in basic-mode extraction.
+                if not (getattr(settings, 'GEMINI_API_KEY', '') or '').strip():
+                    rc.error_message = (
+                        'AI extraction is not configured (GEMINI_API_KEY is missing). '
+                        'Showing basic extraction only; results may be limited.'
+                    )
 
             analysis = normalize_analysis_shape(analysis or {})
 
@@ -157,8 +159,6 @@ class ReviewContractViewSet(viewsets.ModelViewSet):
                 analysis['_meta'].update({
                     'text_chars': len(text or ''),
                     'gemini_configured': bool((getattr(settings, 'GEMINI_API_KEY', '') or '').strip()),
-                    'gemini_success': bool(analysis) and not bool(gemini_error),
-                    'gemini_error': (gemini_error or '').strip() or None,
                     'voyage_configured': bool((getattr(settings, 'VOYAGE_API_KEY', '') or '').strip()),
                 })
 
@@ -197,6 +197,23 @@ class ReviewContractViewSet(viewsets.ModelViewSet):
         r2 = R2StorageService()
         url = r2.generate_presigned_url(rc.r2_key, expiration=3600)
         return Response({'success': True, 'url': url, 'expires_in': 3600}, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['get'], url_path='download')
+    def download(self, request, pk=None):
+        """Download the original uploaded contract file."""
+        rc = self.get_object()
+        r2 = R2StorageService()
+
+        file_bytes = r2.get_file_bytes(rc.r2_key)
+        if not file_bytes:
+            return Response({'success': False, 'error': 'File not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        filename = (rc.original_filename or rc.title or 'contract').strip() or 'contract'
+        content_type, _ = mimetypes.guess_type(filename)
+        content_type = content_type or 'application/octet-stream'
+
+        bio = io.BytesIO(file_bytes)
+        return FileResponse(bio, as_attachment=True, filename=filename, content_type=content_type)
 
     def _build_report_text(self, rc: ReviewContract) -> str:
         a = rc.analysis or {}

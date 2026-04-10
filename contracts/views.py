@@ -65,6 +65,9 @@ from .services import (
 from .clause_seed import ensure_tenant_clause_library_seeded
 from .constraint_library import CONSTRAINT_LIBRARY
 from authentication.r2_service import R2StorageService
+from notifications.email_service import EmailService
+from notifications.models import ContractSummaryEmailLog
+from notifications.tasks import send_contract_summary_followup
 
 logger = logging.getLogger(__name__)
 
@@ -856,6 +859,236 @@ class ContractViewSet(viewsets.ModelViewSet):
         serializer.save(
             tenant_id=self.request.user.tenant_id,
             created_by=self.request.user.user_id
+        )
+
+    def _extract_contract_obligations(self, contract: Contract) -> list[dict]:
+        md = contract.metadata or {}
+        if not isinstance(md, dict):
+            return []
+        for key in ('obligations', 'extracted_obligations', 'obligations_extracted'):
+            val = md.get(key)
+            if isinstance(val, list):
+                return [o for o in val if isinstance(o, dict)]
+        return []
+
+    def _parse_date(self, raw: object):
+        if not raw:
+            return None
+        if hasattr(raw, 'year') and hasattr(raw, 'month') and hasattr(raw, 'day'):
+            return raw
+        s = str(raw).strip()
+        if not s:
+            return None
+        try:
+            return datetime.strptime(s[:10], '%Y-%m-%d').date()
+        except Exception:
+            return None
+
+    def _term_brief(self, contract: Contract) -> dict:
+        return {
+            'status': contract.status,
+            'contract_type': contract.contract_type,
+            'value': str(contract.value) if contract.value is not None else '',
+            'start_date': contract.start_date.isoformat() if contract.start_date else '',
+            'end_date': contract.end_date.isoformat() if contract.end_date else '',
+        }
+
+    def _cooldown_blocked(self, *, tenant_id, contract_id, kind: str, recipient_email: str) -> tuple[bool, str | None]:
+        last = (
+            ContractSummaryEmailLog.objects.filter(
+                tenant_id=tenant_id,
+                contract_id=contract_id,
+                kind=kind,
+                recipient_email=recipient_email,
+                status='sent',
+            )
+            .order_by('-sent_at')
+            .first()
+        )
+        if not last:
+            return (False, None)
+
+        now = timezone.now()
+        next_allowed = last.sent_at + timedelta(hours=12)
+        if now < next_allowed:
+            return (True, next_allowed.isoformat())
+        return (False, None)
+
+    @action(detail=False, methods=['get'], url_path='summary')
+    def summary(self, request):
+        """Dashboard contract summary: overdue / due-this-week / upcoming / expiring."""
+        today = timezone.localdate()
+        due_week_end = today + timedelta(days=7)
+        upcoming_end = today + timedelta(days=30)
+
+        qs = self.get_queryset()
+
+        overdue_contracts_by_id = {}
+        expiring_contracts = []
+        due_this_week = []
+        upcoming = []
+
+        for c in qs.only('id', 'title', 'counterparty', 'contract_type', 'status', 'value', 'start_date', 'end_date', 'metadata'):
+            end_date = c.end_date
+            days_to_end = (end_date - today).days if end_date else None
+
+            obligations = []
+            for o in self._extract_contract_obligations(c):
+                due = self._parse_date(o.get('due_date') or o.get('due'))
+                if due:
+                    o = dict(o)
+                    o['due_date'] = due.isoformat()
+                    obligations.append(o)
+
+            overdue_obs = [o for o in obligations if self._parse_date(o.get('due_date')) and self._parse_date(o.get('due_date')) < today]
+            due_week_obs = [o for o in obligations if self._parse_date(o.get('due_date')) and today <= self._parse_date(o.get('due_date')) <= due_week_end]
+            upcoming_obs = [o for o in obligations if self._parse_date(o.get('due_date')) and due_week_end < self._parse_date(o.get('due_date')) <= upcoming_end]
+
+            base = {
+                'id': str(c.id),
+                'title': c.title,
+                'counterparty': c.counterparty,
+                'contract_type': c.contract_type,
+                'status': c.status,
+                'value': str(c.value) if c.value is not None else None,
+                'start_date': c.start_date.isoformat() if c.start_date else None,
+                'end_date': c.end_date.isoformat() if c.end_date else None,
+            }
+
+            if end_date and end_date < today:
+                entry = overdue_contracts_by_id.setdefault(str(c.id), {**base, 'reasons': []})
+                entry['reasons'].append('end_date_passed')
+                entry['days_overdue'] = abs(days_to_end) if days_to_end is not None else None
+
+            if overdue_obs:
+                entry = overdue_contracts_by_id.setdefault(str(c.id), {**base, 'reasons': []})
+                entry['reasons'].append('overdue_obligations')
+                entry['overdue_obligations'] = overdue_obs
+
+            if end_date and today <= end_date <= due_week_end:
+                expiring_contracts.append({**base, 'days_to_expiry': days_to_end, 'term_brief': self._term_brief(c)})
+
+            if due_week_obs:
+                due_this_week.append({**base, 'obligations': due_week_obs})
+
+            if upcoming_obs:
+                upcoming.append({**base, 'obligations': upcoming_obs})
+
+        return Response(
+            {
+                'today': today.isoformat(),
+                'overdue': list(overdue_contracts_by_id.values()),
+                'due_this_week': due_this_week,
+                'upcoming': upcoming,
+                'expiring': expiring_contracts,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=True, methods=['post'], url_path='summary/send-email')
+    def send_summary_email(self, request, pk=None):
+        contract: Contract = self.get_object()
+        from .serializers import ContractSummaryEmailRequestSerializer
+
+        ser = ContractSummaryEmailRequestSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        kind = ser.validated_data['kind']
+        recipient_email = ser.validated_data['recipient_email']
+        recipient_name = (ser.validated_data.get('recipient_name') or '').strip() or 'there'
+
+        tenant_id = request.user.tenant_id
+        blocked, next_allowed_at = self._cooldown_blocked(
+            tenant_id=tenant_id,
+            contract_id=contract.id,
+            kind=kind,
+            recipient_email=recipient_email,
+        )
+        if blocked:
+            return Response(
+                {
+                    'success': False,
+                    'error': 'Cooldown active. You can send again after 12 hours.',
+                    'next_allowed_at': next_allowed_at,
+                },
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+
+        contract_url = None
+        try:
+            from django.conf import settings
+            base = (getattr(settings, 'FRONTEND_BASE_URL', '') or os.getenv('FRONTEND_BASE_URL') or '').strip().rstrip('/')
+            if base:
+                contract_url = f"{base}/contracts/{contract.id}"
+        except Exception:
+            contract_url = None
+
+        email = EmailService()
+        ok = False
+        subject = ''
+        html = ''
+
+        if kind == 'overdue':
+            obligations = self._extract_contract_obligations(contract)
+            ok = email.send_contract_overdue_email(
+                recipient_email=recipient_email,
+                recipient_name=recipient_name,
+                contract_title=contract.title,
+                counterparty=contract.counterparty,
+                obligations=obligations,
+                contract_url=contract_url,
+            )
+            subject = f"⏰ Overdue items: {contract.title}"
+            html = email._get_contract_overdue_template(
+                recipient_name=recipient_name,
+                contract_title=contract.title,
+                counterparty=contract.counterparty,
+                obligations=obligations,
+                contract_url=contract_url,
+            )
+        else:
+            term_brief = self._term_brief(contract)
+            ok = email.send_contract_renewal_email(
+                recipient_email=recipient_email,
+                recipient_name=recipient_name,
+                contract_title=contract.title,
+                counterparty=contract.counterparty,
+                term_brief=term_brief,
+                contract_url=contract_url,
+            )
+            subject = f"🔁 Renewal brief: {contract.title}"
+            html = email._get_contract_renewal_template(
+                recipient_name=recipient_name,
+                contract_title=contract.title,
+                counterparty=contract.counterparty,
+                term_brief=term_brief,
+                contract_url=contract_url,
+            )
+
+        log = ContractSummaryEmailLog.objects.create(
+            tenant_id=tenant_id,
+            contract_id=contract.id,
+            kind=kind,
+            recipient_email=recipient_email,
+            subject=subject,
+            body_html=html,
+            status='sent' if ok else 'failed',
+            followup_scheduled_at=(timezone.now() + timedelta(hours=12)) if ok else None,
+        )
+
+        if ok:
+            try:
+                send_contract_summary_followup.apply_async(args=[str(log.id)], countdown=12 * 60 * 60)
+            except Exception:
+                pass
+
+        return Response(
+            {
+                'success': bool(ok),
+                'kind': kind,
+                'log_id': str(log.id),
+                'followup_scheduled_at': log.followup_scheduled_at.isoformat() if log.followup_scheduled_at else None,
+            },
+            status=status.HTTP_200_OK if ok else status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
     def _strip_html(self, html: str) -> str:

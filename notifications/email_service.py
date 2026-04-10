@@ -235,6 +235,56 @@ class EmailService:
         except Exception as e:
             logger.error(f"Failed to send inhouse completion email: {str(e)}")
             return False
+
+    def send_contract_overdue_email(
+        self,
+        *,
+        recipient_email: str,
+        recipient_name: str,
+        contract_title: str,
+        counterparty: str | None,
+        obligations: list[dict],
+        contract_url: str | None = None,
+    ) -> bool:
+        subject = f"⏰ Overdue items: {contract_title}"
+        html_body = self._get_contract_overdue_template(
+            recipient_name=recipient_name,
+            contract_title=contract_title,
+            counterparty=counterparty,
+            obligations=obligations,
+            contract_url=contract_url,
+        )
+        return self._send_email(
+            recipient_email=recipient_email,
+            subject=subject,
+            html_body=html_body,
+            notification_type='contract_overdue',
+        )
+
+    def send_contract_renewal_email(
+        self,
+        *,
+        recipient_email: str,
+        recipient_name: str,
+        contract_title: str,
+        counterparty: str | None,
+        term_brief: dict,
+        contract_url: str | None = None,
+    ) -> bool:
+        subject = f"🔁 Renewal brief: {contract_title}"
+        html_body = self._get_contract_renewal_template(
+            recipient_name=recipient_name,
+            contract_title=contract_title,
+            counterparty=counterparty,
+            term_brief=term_brief,
+            contract_url=contract_url,
+        )
+        return self._send_email(
+            recipient_email=recipient_email,
+            subject=subject,
+            html_body=html_body,
+            notification_type='contract_renewal',
+        )
     
     def _send_email(
         self,
@@ -392,6 +442,102 @@ class EmailService:
     </body>
 </html>
 """
+
+    def _get_contract_overdue_template(
+        self,
+        *,
+        recipient_name: str,
+        contract_title: str,
+        counterparty: str | None,
+        obligations: list[dict],
+        contract_url: str | None,
+    ) -> str:
+        safe_title = str(contract_title or '').strip() or 'Contract'
+        safe_counterparty = (str(counterparty).strip() if counterparty else '')
+        items = obligations if isinstance(obligations, list) else []
+
+        rows = []
+        for o in items[:25]:
+            if not isinstance(o, dict):
+                continue
+            action = str(o.get('action') or o.get('obligation') or '').strip()
+            due = str(o.get('due_date') or o.get('due') or '').strip()
+            owner = str(o.get('owner') or o.get('party') or '').strip()
+            if not action:
+                continue
+            meta = ' · '.join([p for p in [owner, due] if p])
+            meta_span = f'<span style="color:#6b7280;"> ({meta})</span>' if meta else ''
+            rows.append(f'<li style="margin:6px 0;"><strong>{action}</strong>{meta_span}</li>')
+
+        link = (
+            f"<p style=\"margin:14px 0;\"><a href=\"{contract_url}\" style=\"display:inline-block;background:#4f46e5;color:#fff;text-decoration:none;padding:10px 14px;border-radius:10px;font-weight:700;\">Open contract</a></p>"
+            if contract_url
+            else ''
+        )
+
+        header = f"<p style=\"margin:0 0 10px 0;\">Hi <strong>{recipient_name}</strong>,</p>"
+        subtitle = f"<p style=\"margin:0 0 12px 0;color:#374151;\">These items look overdue for <strong>{safe_title}</strong>{(f' with <strong>{safe_counterparty}</strong>' if safe_counterparty else '')}.</p>"
+
+        list_html = (
+            f"<ul style=\"margin:10px 0 0 18px;padding:0;color:#111827;\">{''.join(rows)}</ul>"
+            if rows
+            else "<p style=\"margin:0;color:#6b7280;\">No structured obligations were found, but the contract appears time-sensitive.</p>"
+        )
+
+        return (
+            "<div style=\"font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Inter,Arial,sans-serif;color:#111827;\">"
+            + header
+            + subtitle
+            + list_html
+            + link
+            + "<p style=\"margin:14px 0 0 0;color:#6b7280;font-size:12px;\">This reminder was generated automatically by Lawflow.</p>"
+            + "</div>"
+        )
+
+    def _get_contract_renewal_template(
+        self,
+        *,
+        recipient_name: str,
+        contract_title: str,
+        counterparty: str | None,
+        term_brief: dict,
+        contract_url: str | None,
+    ) -> str:
+        safe_title = str(contract_title or '').strip() or 'Contract'
+        safe_counterparty = (str(counterparty).strip() if counterparty else '')
+        b = term_brief if isinstance(term_brief, dict) else {}
+
+        def row(label: str, value: str) -> str:
+            v = (value or '').strip()
+            if not v:
+                return ''
+            return f"<tr><td style=\"padding:6px 10px;color:#6b7280;font-size:12px;\">{label}</td><td style=\"padding:6px 10px;color:#111827;font-size:12px;\">{v}</td></tr>"
+
+        table_rows = ''.join(
+            [
+                row('Status', str(b.get('status') or '')),
+                row('Type', str(b.get('contract_type') or '')),
+                row('Value', str(b.get('value') or '')),
+                row('Start date', str(b.get('start_date') or '')),
+                row('End date', str(b.get('end_date') or '')),
+            ]
+        )
+
+        link = (
+            f"<p style=\"margin:14px 0;\"><a href=\"{contract_url}\" style=\"display:inline-block;background:#4f46e5;color:#fff;text-decoration:none;padding:10px 14px;border-radius:10px;font-weight:700;\">Open contract</a></p>"
+            if contract_url
+            else ''
+        )
+
+        return (
+            "<div style=\"font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Inter,Arial,sans-serif;color:#111827;\">"
+            + f"<p style=\"margin:0 0 10px 0;\">Hi <strong>{recipient_name}</strong>,</p>"
+            + f"<p style=\"margin:0 0 12px 0;color:#374151;\">Here’s a renewal brief for <strong>{safe_title}</strong>{(f' with <strong>{safe_counterparty}</strong>' if safe_counterparty else '')}.</p>"
+            + f"<table style=\"border-collapse:collapse;width:100%;max-width:640px;background:#f9fafb;border:1px solid #e5e7eb;border-radius:12px;overflow:hidden;\">{table_rows}</table>"
+            + link
+            + "<p style=\"margin:14px 0 0 0;color:#6b7280;font-size:12px;\">This brief was generated automatically by Lawflow.</p>"
+            + "</div>"
+        )
 
     def _get_inhouse_completed_template(
         self,
