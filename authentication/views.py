@@ -1,6 +1,12 @@
 """
 Authentication views with real OTP implementation
 """
+import hashlib
+import hmac
+import mimetypes
+from urllib.parse import urlencode
+
+from django.http import HttpResponse
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -143,25 +149,87 @@ def _get_auth_user(request) -> User:
     return User.objects.get(user_id=str(user_id))
 
 
-def _avatar_url_for_user(user: User):
+def _sign_media_url(user_id: str, r2_key: str) -> str:
+    payload = f"{str(user_id)}:{str(r2_key)}".encode('utf-8')
+    secret = (getattr(settings, 'SECRET_KEY', '') or '').encode('utf-8')
+    return hmac.new(secret, payload, hashlib.sha256).hexdigest()
+
+
+def _build_media_url(user_id: str, r2_key: str) -> str:
+    qs = urlencode(
+        {
+            'user_id': str(user_id),
+            'key': str(r2_key),
+            'sig': _sign_media_url(user_id, r2_key),
+        }
+    )
+    return f"/api/auth/media/?{qs}"
+
+
+def _absolute_media_url(request, user_id: str, r2_key: str) -> str:
+    relative_url = _build_media_url(user_id, r2_key)
+    try:
+        if request is not None:
+            return request.build_absolute_uri(relative_url)
+    except Exception:
+        pass
+    backend_base = (getattr(settings, 'BACKEND_BASE_URL', '') or '').strip().rstrip('/')
+    return f"{backend_base}{relative_url}" if backend_base else relative_url
+
+
+def _user_owns_media_key(user: User, r2_key: str) -> bool:
+    if not r2_key:
+        return False
+    if (getattr(user, 'avatar_r2_key', None) or '').strip() == str(r2_key).strip():
+        return True
+    for item in (getattr(user, 'images', None) or []):
+        if isinstance(item, dict) and str(item.get('r2_key') or '').strip() == str(r2_key).strip():
+            return True
+    return False
+
+
+def _avatar_url_for_user(user: User, request=None):
     avatar_key = (getattr(user, 'avatar_r2_key', None) or '').strip()
     if not avatar_key:
         return None
 
     try:
-        return R2StorageService().generate_presigned_url(avatar_key, expiration=3600)
+        return _absolute_media_url(request, str(getattr(user, 'user_id', None) or ''), avatar_key)
     except Exception as exc:
         logger.warning('Unable to generate avatar URL for %s: %s', getattr(user, 'email', None), exc)
         return None
 
 
-def _serialize_user_context(user: User) -> dict:
+def _serialize_user_context(user: User, request=None) -> dict:
     tenant_id = _tenant_id_claim(user)
     is_admin = bool(getattr(user, 'is_admin', False) or getattr(user, 'is_staff', False) or getattr(user, 'is_superuser', False))
     is_superadmin = bool(getattr(user, 'is_superadmin', False) or getattr(user, 'is_superuser', False))
     first_name = getattr(user, 'first_name', '') or ''
     last_name = getattr(user, 'last_name', '') or ''
     full_name = getattr(user, 'full_name', None) or ' '.join(part for part in [first_name.strip(), last_name.strip()] if part).strip()
+
+    # Build images list with presigned URLs where possible.
+    images_list = []
+    try:
+        raw_images = getattr(user, 'images', None) or []
+        for item in raw_images:
+            if not isinstance(item, dict):
+                continue
+            r2_key = item.get('r2_key') or item.get('r2key') or item.get('key')
+            url = None
+            if r2_key:
+                try:
+                    url = _absolute_media_url(request, str(getattr(user, 'user_id', None) or ''), r2_key)
+                except Exception:
+                    url = None
+            images_list.append({
+                'r2_key': r2_key,
+                'url': url,
+                'purpose': item.get('purpose'),
+                'uploaded_at': item.get('uploaded_at'),
+            })
+    except Exception:
+        images_list = []
 
     return {
         'user_id': str(getattr(user, 'user_id', None) or getattr(user, 'pk', None) or ''),
@@ -170,14 +238,51 @@ def _serialize_user_context(user: User) -> dict:
         'first_name': first_name,
         'last_name': last_name,
         'tenant_id': tenant_id,
-        'avatar_url': _avatar_url_for_user(user),
+        'avatar_url': _avatar_url_for_user(user, request=request),
+        'images': images_list,
         'pending_email': getattr(user, 'pending_email', None),
         'is_admin': is_admin,
         'is_superadmin': is_superadmin,
     }
 
 
-def _build_auth_response(user: User) -> dict:
+class ProfileMediaView(APIView):
+    """GET /api/auth/media/?user_id=...&key=...&sig=... - stream a profile image."""
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        user_id = str(request.query_params.get('user_id') or '').strip()
+        r2_key = str(request.query_params.get('key') or '').strip()
+        sig = str(request.query_params.get('sig') or '').strip()
+
+        if not user_id or not r2_key or not sig:
+            return Response({'error': 'Missing media parameters'}, status=status.HTTP_400_BAD_REQUEST)
+
+        expected_sig = _sign_media_url(user_id, r2_key)
+        if not hmac.compare_digest(expected_sig, sig):
+            return Response({'error': 'Invalid media signature'}, status=status.HTTP_403_FORBIDDEN)
+
+        try:
+            user = User.objects.get(user_id=user_id)
+        except User.DoesNotExist:
+            return Response({'error': 'Media not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        if not _user_owns_media_key(user, r2_key):
+            return Response({'error': 'Media not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            content = R2StorageService().get_file_bytes(r2_key)
+        except Exception as exc:
+            logger.warning('Unable to fetch media for %s: %s', r2_key, exc)
+            return Response({'error': 'Media not available'}, status=status.HTTP_404_NOT_FOUND)
+
+        content_type, _ = mimetypes.guess_type(r2_key)
+        response = HttpResponse(content, content_type=content_type or 'application/octet-stream')
+        response['Cache-Control'] = 'public, max-age=31536000, immutable'
+        return response
+
+
+def _build_auth_response(user: User, request=None) -> dict:
     refresh = RefreshToken.for_user(user)
     is_admin = bool(user.is_staff or user.is_superuser)
     is_superadmin = bool(user.is_superuser)
@@ -197,7 +302,7 @@ def _build_auth_response(user: User) -> dict:
     return {
         'access': str(access),
         'refresh': str(refresh),
-        'user': _serialize_user_context(user),
+        'user': _serialize_user_context(user, request=request),
     }
 
 
@@ -264,7 +369,7 @@ class TokenView(APIView):
 
         _bootstrap_admin_if_enabled(user)
 
-        auth_payload = _build_auth_response(user)
+        auth_payload = _build_auth_response(user, request=request)
         user.last_login = timezone.now()
         user.save(update_fields=['last_login'])
 
@@ -380,7 +485,7 @@ class CurrentUserView(APIView):
         except User.DoesNotExist:
             return Response({'error': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        return Response(_serialize_user_context(user), status=status.HTTP_200_OK)
+        return Response(_serialize_user_context(user, request=request), status=status.HTTP_200_OK)
 
     @extend_schema(request=UpdateProfileRequestSerializer, responses={200: UpdateProfileResponseSerializer})
     def patch(self, request):
@@ -402,7 +507,7 @@ class CurrentUserView(APIView):
         user.first_name = first_name
         user.last_name = last_name
         user.save(update_fields=['first_name', 'last_name'])
-        return Response({'message': 'Profile updated', 'user': _serialize_user_context(user)}, status=status.HTTP_200_OK)
+        return Response({'message': 'Profile updated', 'user': _serialize_user_context(user, request=request)}, status=status.HTTP_200_OK)
 
 
 class RequestEmailChangeView(APIView):
@@ -482,7 +587,7 @@ class VerifyEmailChangeView(APIView):
         user.save(update_fields=['email', 'pending_email', 'pending_email_otp', 'pending_email_otp_created_at', 'pending_email_otp_attempts'])
         _propagate_email_change(old_email, new_email)
 
-        return Response(_build_auth_response(user), status=status.HTTP_200_OK)
+        return Response(_build_auth_response(user, request=request), status=status.HTTP_200_OK)
 
 
 class AvatarUploadView(APIView):
@@ -522,7 +627,27 @@ class AvatarUploadView(APIView):
             return Response({'error': str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
         user.avatar_r2_key = uploaded_key
-        user.save(update_fields=['avatar_r2_key'])
+        # If request asks to store image in the user's images storage, append metadata.
+        add_to_images_raw = request.data.get('add_to_images', '')
+        add_to_images = str(add_to_images_raw).strip().lower() in ('1', 'true', 'yes', 'y')
+        purpose = str(request.data.get('purpose', '') or '').strip() or 'user_uploaded'
+
+        if add_to_images:
+            try:
+                current_images = getattr(user, 'images', None) or []
+                entry = {
+                    'r2_key': uploaded_key,
+                    'purpose': purpose,
+                    'uploaded_at': timezone.now().isoformat(),
+                }
+                current_images.append(entry)
+                user.images = current_images
+                user.save(update_fields=['avatar_r2_key', 'images'])
+            except Exception:
+                # Fallback: still save avatar key
+                user.save(update_fields=['avatar_r2_key'])
+        else:
+            user.save(update_fields=['avatar_r2_key'])
 
         if old_key and old_key != uploaded_key:
             try:
@@ -553,7 +678,7 @@ class AvatarUploadView(APIView):
                     _clear_pending_email_change(user)
                     user.save(update_fields=['pending_email', 'pending_email_otp', 'pending_email_otp_created_at', 'pending_email_otp_attempts'])
 
-        resp = {'message': 'Avatar updated', 'user': _serialize_user_context(user)}
+        resp = {'message': 'Avatar updated', 'user': _serialize_user_context(user, request=request)}
         if email_otp_result is not None:
             resp['email_change'] = email_otp_result
 
@@ -576,7 +701,7 @@ class AvatarUploadView(APIView):
             except Exception:
                 logger.warning('Failed to delete avatar object for user %s', user.user_id)
 
-        return Response({'message': 'Avatar removed', 'user': _serialize_user_context(user)}, status=status.HTTP_200_OK)
+        return Response({'message': 'Avatar removed', 'user': _serialize_user_context(user, request=request)}, status=status.HTTP_200_OK)
 
 
 class LogoutView(APIView):
@@ -659,7 +784,7 @@ class VerifyEmailOTPView(APIView):
                 OTPService.send_welcome_email(user)
 
             OTPService.clear_otp(user, 'login')
-            auth_payload = _build_auth_response(user)
+            auth_payload = _build_auth_response(user, request=request)
             user.last_login = timezone.now()
             user.save(update_fields=['last_login'])
             
@@ -786,7 +911,7 @@ class GoogleLoginView(APIView):
 
         _bootstrap_admin_if_enabled(user)
 
-        auth_payload = _build_auth_response(user)
+        auth_payload = _build_auth_response(user, request=request)
 
         user.last_login = timezone.now()
         user.save(update_fields=['last_login'])

@@ -278,6 +278,18 @@ class R2StorageService:
         Returns:
             str: Presigned URL
         """
+        # If a public base URL is configured, return a stable public URL (no expiry).
+        public_base = getattr(settings, 'R2_PUBLIC_URL', '') or getattr(settings, 'R2_PUBLIC_BASE_URL', '')
+        if public_base:
+            public_base = public_base.rstrip('/')
+            # Many deployments expose the bucket under the public base URL using the pattern:
+            # {R2_PUBLIC_URL}/{bucket}/{key} or sometimes {R2_PUBLIC_URL}/{key} depending on setup.
+            # Try the common pattern first including bucket name.
+            try:
+                return f"{public_base}/{self.bucket_name}/{r2_key}"
+            except Exception:
+                return f"{public_base}/{r2_key}"
+
         try:
             url = self.client.generate_presigned_url(
                 'get_object',

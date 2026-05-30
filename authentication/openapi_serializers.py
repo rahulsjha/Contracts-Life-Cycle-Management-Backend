@@ -9,6 +9,7 @@ class UserContextSerializer(serializers.Serializer):
     last_name = serializers.CharField(allow_blank=True, required=False)
     tenant_id = serializers.CharField(allow_null=True, required=False)
     avatar_url = serializers.CharField(allow_null=True, required=False)
+    images = serializers.ListField(child=serializers.DictField(), required=False)
     pending_email = serializers.EmailField(allow_null=True, required=False)
     is_admin = serializers.BooleanField()
     is_superadmin = serializers.BooleanField()

@@ -18,6 +18,7 @@ from .views import (
     RequestEmailChangeView,
     VerifyEmailChangeView,
     AvatarUploadView,
+    ProfileMediaView,
     GoogleLoginView,
 )
 
@@ -38,4 +39,5 @@ urlpatterns = [
     path('email-change/request/', RequestEmailChangeView.as_view(), name='request_email_change'),
     path('email-change/verify/', VerifyEmailChangeView.as_view(), name='verify_email_change'),
     path('avatar/', AvatarUploadView.as_view(), name='avatar'),
+    path('media/', ProfileMediaView.as_view(), name='profile_media'),
 ]

@@ -26,6 +26,9 @@ class User(AbstractBaseUser, PermissionsMixin):
     first_name = models.CharField(max_length=150, blank=True)
     last_name = models.CharField(max_length=150, blank=True)
     avatar_r2_key = models.CharField(max_length=500, blank=True, null=True)
+    # Stores a list of uploaded images for the user. Each entry is a dict
+    # with keys such as: r2_key, purpose, uploaded_at
+    images = models.JSONField(blank=True, default=list)
     pending_email = models.EmailField(blank=True, null=True)
     pending_email_otp = models.CharField(max_length=10, blank=True, null=True)
     pending_email_otp_created_at = models.DateTimeField(blank=True, null=True)

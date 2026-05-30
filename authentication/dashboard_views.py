@@ -6,6 +6,7 @@ from datetime import timedelta
 from django.db.models import Count
 from django.db.models.functions import TruncDay
 from django.db.models import Q
+from django.db.utils import OperationalError, ProgrammingError
 from django.utils import timezone
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -20,6 +21,20 @@ from reviews.models import ReviewContract
 
 class DashboardInsightsView(APIView):
     permission_classes = [IsAuthenticated]
+
+    @staticmethod
+    def _safe_count(queryset) -> int:
+        try:
+            return int(queryset.count())
+        except (OperationalError, ProgrammingError):
+            return 0
+
+    @staticmethod
+    def _safe_rows(queryset) -> list[dict]:
+        try:
+            return list(queryset)
+        except (OperationalError, ProgrammingError):
+            return []
 
     def get(self, request):
         user = request.user
@@ -36,11 +51,13 @@ class DashboardInsightsView(APIView):
 
         # Derive usage counts from first-class data so the dashboard remains
         # informative even when AuditLog coverage is partial.
-        review_count_30d = ReviewContract.objects.filter(
-            tenant_id=tenant_id,
-            created_by=user_id,
-            created_at__gte=since_30d,
-        ).count()
+        review_count_30d = self._safe_count(
+            ReviewContract.objects.filter(
+                tenant_id=tenant_id,
+                created_by=user_id,
+                created_at__gte=since_30d,
+            )
+        )
 
         def _count_r2_objects_since(*, prefix: str, since_dt, max_keys: int = 2000) -> int:
             try:
@@ -73,11 +90,13 @@ class DashboardInsightsView(APIView):
         try:
             from repository.models import Document
 
-            repository_upload_count_30d = Document.objects.filter(
-                tenant_id=tenant_id,
-                uploaded_by_id=user_id,
-                uploaded_at__gte=since_30d,
-            ).count()
+            repository_upload_count_30d = self._safe_count(
+                Document.objects.filter(
+                    tenant_id=tenant_id,
+                    uploaded_by_id=user_id,
+                    uploaded_at__gte=since_30d,
+                )
+            )
         except Exception:
             repository_upload_count_30d = 0
 
@@ -92,20 +111,24 @@ class DashboardInsightsView(APIView):
         upload_count_30d = int(repository_upload_count_30d) + int(private_upload_count_30d) + int(contracts_r2_upload_count_30d)
 
         # Templates: include both DB-backed template files and contract templates.
-        template_files_count = TemplateFile.objects.filter(
-            Q(tenant_id=tenant_id) | Q(tenant_id__isnull=True),
-            status='active',
-        ).count()
+        template_files_count = self._safe_count(
+            TemplateFile.objects.filter(
+                Q(tenant_id=tenant_id) | Q(tenant_id__isnull=True),
+                status='active',
+            )
+        )
 
-        contract_templates_count = ContractTemplate.objects.filter(
-            tenant_id=tenant_id,
-            status='published',
-        ).count()
+        contract_templates_count = self._safe_count(
+            ContractTemplate.objects.filter(
+                tenant_id=tenant_id,
+                status='published',
+            )
+        )
 
         templates_count = int(template_files_count) + int(contract_templates_count)
 
         # -------------------- Feature usage (Audit logs) --------------------
-        feature_rows = (
+        feature_rows = self._safe_rows(
             AuditLogModel.objects.filter(tenant_id=tenant_id, user_id=user_id, created_at__gte=since_30d)
             .values('entity_type')
             .annotate(count=Count('id'))
@@ -136,7 +159,7 @@ class DashboardInsightsView(APIView):
                 break
 
         # -------------------- Activity trend (last 14 days) --------------------
-        day_rows = (
+        day_rows = self._safe_rows(
             AuditLogModel.objects.filter(tenant_id=tenant_id, user_id=user_id, created_at__gte=since_14d)
             .annotate(day=TruncDay('created_at'))
             .values('day')
@@ -150,7 +173,7 @@ class DashboardInsightsView(APIView):
             activity_last_14_days.append({'date': d, 'count': int(day_map.get(d, 0))})
 
         # -------------------- Contracts by type --------------------
-        contract_rows = (
+        contract_rows = self._safe_rows(
             Contract.objects.filter(tenant_id=tenant_id, created_by=user_id, created_at__gte=since_180d)
             .values('contract_type')
             .annotate(count=Count('id'))
@@ -167,7 +190,7 @@ class DashboardInsightsView(APIView):
         # (Template/AI Builder) backed by DraftGenerationTask. Review uses AI too, but it's
         # reported separately so it doesn't inflate contract-generation metrics.
 
-        contract_ai_rows = (
+        contract_ai_rows = self._safe_rows(
             DraftGenerationTask.objects.filter(tenant_id=tenant_id, user_id=user_id, created_at__gte=since_180d)
             .values('status')
             .annotate(count=Count('id'))
@@ -183,7 +206,7 @@ class DashboardInsightsView(APIView):
             for s, c in sorted(contract_ai_status_map.items(), key=lambda kv: kv[1], reverse=True)
         ]
 
-        review_ai_rows = (
+        review_ai_rows = self._safe_rows(
             ReviewContract.objects.filter(tenant_id=tenant_id, created_by=user_id, created_at__gte=since_180d)
             .values('status')
             .annotate(count=Count('id'))
@@ -206,7 +229,7 @@ class DashboardInsightsView(APIView):
         ]
 
         # -------------------- Review stats --------------------
-        review_rows = (
+        review_rows = self._safe_rows(
             ReviewContract.objects.filter(tenant_id=tenant_id, created_by=user_id, created_at__gte=since_180d)
             .values('status')
             .annotate(count=Count('id'))
@@ -221,21 +244,25 @@ class DashboardInsightsView(APIView):
         upcoming_end_365d = now + timedelta(days=365)
 
         # Overlap filter: event intersects [now, end)
-        upcoming_30d = CalendarEvent.objects.filter(
-            tenant_id=tenant_id,
-            created_by=user_id,
-            start_datetime__lt=upcoming_end_30d,
-            end_datetime__gte=now,
-        ).count()
+        upcoming_30d = self._safe_count(
+            CalendarEvent.objects.filter(
+                tenant_id=tenant_id,
+                created_by=user_id,
+                start_datetime__lt=upcoming_end_30d,
+                end_datetime__gte=now,
+            )
+        )
 
-        upcoming_365d = CalendarEvent.objects.filter(
-            tenant_id=tenant_id,
-            created_by=user_id,
-            start_datetime__lt=upcoming_end_365d,
-            end_datetime__gte=now,
-        ).count()
+        upcoming_365d = self._safe_count(
+            CalendarEvent.objects.filter(
+                tenant_id=tenant_id,
+                created_by=user_id,
+                start_datetime__lt=upcoming_end_365d,
+                end_datetime__gte=now,
+            )
+        )
 
-        calendar_rows = (
+        calendar_rows = self._safe_rows(
             CalendarEvent.objects.filter(tenant_id=tenant_id, created_by=user_id, start_datetime__gte=since_180d)
             .values('category')
             .annotate(count=Count('id'))
@@ -259,11 +286,11 @@ class DashboardInsightsView(APIView):
             created_at__gte=since_180d,
         )
 
-        firma_total = firma_qs.count()
-        signnow_total = signnow_qs.count()
+        firma_total = self._safe_count(firma_qs)
+        signnow_total = self._safe_count(signnow_qs)
 
-        firma_status_rows = firma_qs.values('status').annotate(count=Count('id')).order_by('-count')
-        signnow_status_rows = signnow_qs.values('status').annotate(count=Count('id')).order_by('-count')
+        firma_status_rows = self._safe_rows(firma_qs.values('status').annotate(count=Count('id')).order_by('-count'))
+        signnow_status_rows = self._safe_rows(signnow_qs.values('status').annotate(count=Count('id')).order_by('-count'))
 
         firma_by_status = [
             {'status': (r.get('status') or 'unknown'), 'count': int(r.get('count') or 0)}
