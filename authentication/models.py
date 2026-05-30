@@ -25,6 +25,11 @@ class User(AbstractBaseUser, PermissionsMixin):
     email = models.EmailField(unique=True, max_length=255)
     first_name = models.CharField(max_length=150, blank=True)
     last_name = models.CharField(max_length=150, blank=True)
+    avatar_r2_key = models.CharField(max_length=500, blank=True, null=True)
+    pending_email = models.EmailField(blank=True, null=True)
+    pending_email_otp = models.CharField(max_length=10, blank=True, null=True)
+    pending_email_otp_created_at = models.DateTimeField(blank=True, null=True)
+    pending_email_otp_attempts = models.IntegerField(default=0)
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
     is_superuser = models.BooleanField(default=False)
@@ -47,3 +52,12 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     def __str__(self):
         return self.email
+
+    @property
+    def full_name(self):
+        parts = [self.first_name or '', self.last_name or '']
+        return ' '.join(part.strip() for part in parts if part and part.strip()).strip()
+
+    @property
+    def display_name(self):
+        return self.full_name or self.email

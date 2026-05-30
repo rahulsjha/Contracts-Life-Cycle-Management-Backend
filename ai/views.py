@@ -11,6 +11,7 @@ from django.utils import timezone
 import uuid
 import logging
 import json
+import os
 from repository.models import Document
 from repository.embeddings_service import VoyageEmbeddingsService
 import google.generativeai as genai
@@ -21,7 +22,10 @@ from contracts.models import Clause
 logger = logging.getLogger(__name__)
 
 # Configure Gemini
-genai.configure(api_key=settings.GEMINI_API_KEY)
+_raw_gemini_api_key = (getattr(settings, 'GEMINI_API_KEY', '') or '')
+_normalized_gemini_api_key = ''.join(_raw_gemini_api_key.split())
+if _normalized_gemini_api_key:
+    genai.configure(api_key=_normalized_gemini_api_key)
 
 
 class AIViewSet(viewsets.ViewSet):
@@ -240,7 +244,7 @@ class AIViewSet(viewsets.ViewSet):
         if not isinstance(current_text, str) or not current_text.strip():
             return Response({'error': 'current_text is required'}, status=status.HTTP_400_BAD_REQUEST)
 
-        if not (settings.GEMINI_API_KEY or '').strip():
+        if not _normalized_gemini_api_key:
             return Response({'error': 'GEMINI_API_KEY is not configured'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
         model_name = getattr(settings, 'GEMINI_CONTRACT_EDIT_MODEL', None) or 'gemini-2.5-pro'
@@ -399,8 +403,10 @@ Relevant clause library (optional):
                 payload = {'model': model_name}
                 if task is not None:
                     payload['task_id'] = task.task_id
+                logger.info(f"[SSE] Emitting meta event with task_id={payload.get('task_id')}, model={model_name}")
                 yield f"event: meta\ndata: {json.dumps(payload)}\n\n"
-            except Exception:
+            except Exception as e:
+                logger.exception(f"[SSE] Error yielding meta event: {e}")
                 pass
 
             def _extract_text_from_chunk(chunk) -> str:
@@ -462,24 +468,31 @@ Relevant clause library (optional):
 
             try:
                 model = genai.GenerativeModel(model_name)
-                any_delta = False
-                last_chunk = None
+                logger.info(f"[SSE] Starting bounded Gemini generation with model={model_name}")
+                timeout_s = int(os.getenv('GEMINI_STREAM_TIMEOUT_SECONDS', '50'))
+                response = model.generate_content(generation_prompt, request_options={'timeout': timeout_s})
+                full_text = getattr(response, 'text', None) or ''
 
-                for chunk in model.generate_content(generation_prompt, stream=True):
-                    last_chunk = chunk
-                    delta = _extract_text_from_chunk(chunk)
-                    if not delta:
-                        continue
-                    any_delta = True
-                    yield f"event: delta\ndata: {json.dumps({'delta': delta})}\n\n"
-
-                if not any_delta:
-                    safety = _safety_summary_from_chunk(last_chunk) if last_chunk is not None else ''
+                if not full_text.strip():
+                    safety = _safety_summary_from_chunk(response)
                     msg = 'AI returned no text output.'
                     if safety:
                         msg = 'AI response appears to be blocked by safety filters.'
                         msg += f" Safety ratings: {safety}."
+                    logger.error(f"[SSE] {msg}")
                     raise RuntimeError(msg)
+
+                # Emit deterministic chunks so UI sees progressive updates even if provider
+                # does not stream token-by-token reliably.
+                chunk_size = int(os.getenv('SSE_DELTA_CHUNK_SIZE', '700'))
+                offset = 0
+                chunk_count = 0
+                while offset < len(full_text):
+                    piece = full_text[offset: offset + chunk_size]
+                    offset += chunk_size
+                    chunk_count += 1
+                    yield f"event: delta\ndata: {json.dumps({'delta': piece})}\n\n"
+                logger.info(f"[SSE] Emitted {chunk_count} deterministic delta chunks")
 
                 if task is not None:
                     try:
@@ -493,8 +506,10 @@ Relevant clause library (optional):
             except GeneratorExit:
                 # Client disconnected early; keep status as-is (processing) so
                 # the generation is still counted for usage KPIs.
+                logger.warning("[SSE] GeneratorExit: client disconnected early")
                 raise
             except Exception as e:
+                logger.exception(f"[SSE] Exception in event_stream: {type(e).__name__}: {e}")
                 if task is not None:
                     try:
                         task.status = 'failed'
@@ -508,10 +523,12 @@ Relevant clause library (optional):
                 cleaned = raw
                 if 'response.text' in raw and 'candidate.safety_ratings' in raw:
                     cleaned = 'AI response was blocked by safety filters. Try rephrasing your instruction.'
+                logger.info(f"[SSE] Emitting error event: {cleaned}")
                 yield f"event: error\ndata: {json.dumps({'error': cleaned})}\n\n"
 
         resp = StreamingHttpResponse(event_stream(), content_type='text/event-stream')
         resp['Cache-Control'] = 'no-cache'
         resp['X-Accel-Buffering'] = 'no'
+        resp['Connection'] = 'keep-alive'
         return resp
 

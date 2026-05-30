@@ -31,13 +31,27 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 
-from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import LETTER
-from reportlab.lib.units import inch
-from reportlab.lib.utils import ImageReader
+_HAS_PDF_LIBS = True
+try:
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.pagesizes import LETTER
+    from reportlab.lib.units import inch
+    from reportlab.lib.utils import ImageReader
 
-from PIL import Image
-from pypdf import PdfReader, PdfWriter
+    from PIL import Image
+    from pypdf import PdfReader, PdfWriter
+except Exception:  # pragma: no cover - allow running without native imaging libs
+    # If reportlab/Pillow/pypdf aren't available (local dev), set a flag and
+    # provide minimal fallbacks. Actual e-sign functionality will be disabled
+    # until the dependencies are installed.
+    _HAS_PDF_LIBS = False
+    canvas = None
+    LETTER = None
+    inch = None
+    ImageReader = None
+    Image = None
+    PdfReader = None
+    PdfWriter = None
 
 from authentication.r2_service import R2StorageService
 

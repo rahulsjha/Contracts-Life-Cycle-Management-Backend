@@ -1,6 +1,6 @@
 #!/Users/vishaljha/Desktop/CLM/Contracts-Life-Cycle-Management-Backend/.venv/bin/python3
 import sys
-from gunicorn.app.wsgiapp import run
+from idna.cli import main
 if __name__ == '__main__':
     sys.argv[0] = sys.argv[0].removesuffix('.exe')
-    sys.exit(run())
+    sys.exit(main())

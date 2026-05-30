@@ -15,6 +15,9 @@ from .views import (
     ResendPasswordResetOTPView,
     RequestLoginOTPView,
     VerifyEmailOTPView,
+    RequestEmailChangeView,
+    VerifyEmailChangeView,
+    AvatarUploadView,
     GoogleLoginView,
 )
 
@@ -32,4 +35,7 @@ urlpatterns = [
     path('resend-password-reset-otp/', ResendPasswordResetOTPView.as_view(), name='resend_password_reset_otp'),
     path('request-login-otp/', RequestLoginOTPView.as_view(), name='request_login_otp'),
     path('verify-email-otp/', VerifyEmailOTPView.as_view(), name='verify_email_otp'),
+    path('email-change/request/', RequestEmailChangeView.as_view(), name='request_email_change'),
+    path('email-change/verify/', VerifyEmailChangeView.as_view(), name='verify_email_change'),
+    path('avatar/', AvatarUploadView.as_view(), name='avatar'),
 ]

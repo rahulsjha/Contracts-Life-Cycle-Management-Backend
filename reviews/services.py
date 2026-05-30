@@ -17,6 +17,21 @@ from .models import ClauseLibraryItem
 logger = logging.getLogger(__name__)
 
 
+# Disable Voyage calls after a hard auth/config failure so requests stay fast.
+_VOYAGE_DISABLED_REASON = None
+
+
+def _voyage_is_disabled() -> bool:
+    return bool(_VOYAGE_DISABLED_REASON)
+
+
+def _disable_voyage(reason: str) -> None:
+    global _VOYAGE_DISABLED_REASON
+    if not _VOYAGE_DISABLED_REASON:
+        _VOYAGE_DISABLED_REASON = reason
+        logger.warning('Voyage disabled for this process: %s', reason)
+
+
 MAX_EXTRACT_CHARS = 120_000
 
 
@@ -209,8 +224,21 @@ def extract_text_with_ocr_fallback(file_bytes: bytes, filename: str) -> str:
 
 
 def generate_voyage_embedding(text: str) -> Optional[list]:
+    voyage_enabled = os.getenv('ENABLE_VOYAGE_EMBEDDINGS', 'False').strip().lower() in (
+        '1', 'true', 'yes', 'y', 'on'
+    )
+    if not voyage_enabled:
+        return None
+
+    if _voyage_is_disabled():
+        return None
+
     api_key = (settings.VOYAGE_API_KEY or '').strip()
     if not api_key:
+        return None
+
+    if any(ch.isspace() for ch in api_key):
+        _disable_voyage('VOYAGE_API_KEY has invalid whitespace')
         return None
 
     try:
@@ -223,10 +251,12 @@ def generate_voyage_embedding(text: str) -> Optional[list]:
             'https://api.voyageai.com/v1/embeddings',
             headers={'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'},
             json=payload,
-            timeout=25,
+            timeout=int(os.getenv('VOYAGE_HTTP_TIMEOUT_SECONDS', '6')),
         )
         if resp.status_code >= 400:
             logger.warning('Voyage embedding failed: %s %s', resp.status_code, resp.text[:500])
+            if resp.status_code in (400, 401, 403):
+                _disable_voyage(f'auth/config error status={resp.status_code}')
             return None
 
         data = resp.json() or {}
@@ -309,7 +339,7 @@ EXTRACTION_SCHEMA_HINT = {
 
 
 def gemini_extract_and_review(text: str, *, filename: str = '') -> Tuple[dict, str]:
-    api_key = (settings.GEMINI_API_KEY or '').strip()
+    api_key = ''.join((settings.GEMINI_API_KEY or '').split())
     if not api_key:
         return ({}, '')
 
@@ -336,7 +366,8 @@ def gemini_extract_and_review(text: str, *, filename: str = '') -> Tuple[dict, s
             f"{(text or '')[:25000]}"
         )
 
-        resp = model.generate_content(prompt)
+        timeout_s = int(os.getenv('GEMINI_REVIEW_TIMEOUT_SECONDS', '45'))
+        resp = model.generate_content(prompt, request_options={'timeout': timeout_s})
         out_text = getattr(resp, 'text', None) or ''
         data = _safe_json_from_text(out_text) or {}
         review_text = ''

@@ -4,7 +4,12 @@ from rest_framework import serializers
 class UserContextSerializer(serializers.Serializer):
     user_id = serializers.CharField()
     email = serializers.EmailField(allow_null=True, required=False)
+    full_name = serializers.CharField(allow_blank=True, required=False)
+    first_name = serializers.CharField(allow_blank=True, required=False)
+    last_name = serializers.CharField(allow_blank=True, required=False)
     tenant_id = serializers.CharField(allow_null=True, required=False)
+    avatar_url = serializers.CharField(allow_null=True, required=False)
+    pending_email = serializers.EmailField(allow_null=True, required=False)
     is_admin = serializers.BooleanField()
     is_superadmin = serializers.BooleanField()
 
@@ -60,6 +65,31 @@ class VerifyEmailOTPRequestSerializer(serializers.Serializer):
 class VerifyEmailOTPResponseSerializer(serializers.Serializer):
     access = serializers.CharField()
     refresh = serializers.CharField()
+    user = UserContextSerializer()
+
+
+class UpdateProfileRequestSerializer(serializers.Serializer):
+    full_name = serializers.CharField(required=False, allow_blank=True)
+    first_name = serializers.CharField(required=False, allow_blank=True)
+    last_name = serializers.CharField(required=False, allow_blank=True)
+
+
+class UpdateProfileResponseSerializer(serializers.Serializer):
+    message = serializers.CharField()
+    user = UserContextSerializer()
+
+
+class RequestEmailChangeSerializer(serializers.Serializer):
+    new_email = serializers.EmailField()
+
+
+class VerifyEmailChangeSerializer(serializers.Serializer):
+    new_email = serializers.EmailField()
+    otp = serializers.CharField()
+
+
+class AvatarResponseSerializer(serializers.Serializer):
+    message = serializers.CharField()
     user = UserContextSerializer()
 
 

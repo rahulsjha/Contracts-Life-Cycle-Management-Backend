@@ -5,6 +5,7 @@ Falls back to semantic mock embeddings for testing/demo
 """
 import json
 import logging
+import os
 from typing import List, Optional, Dict
 from django.conf import settings
 import numpy as np
@@ -15,6 +16,9 @@ except Exception:  # pragma: no cover
     voyageai = None
 
 logger = logging.getLogger(__name__)
+
+
+_VOYAGE_AUTH_DISABLED = False
 
 
 class SemanticMockEmbeddings:
@@ -91,6 +95,20 @@ class VoyageEmbeddingsService:
         self.api_key = settings.VOYAGE_API_KEY
         self.client = None
         self.use_mock = False
+
+        voyage_enabled = os.getenv('ENABLE_VOYAGE_EMBEDDINGS', 'False').strip().lower() in (
+            '1', 'true', 'yes', 'y', 'on'
+        )
+        if not voyage_enabled:
+            self.use_mock = True
+            logger.info("Voyage embeddings are disabled (ENABLE_VOYAGE_EMBEDDINGS is false); using semantic mock")
+            return
+
+        global _VOYAGE_AUTH_DISABLED
+        if _VOYAGE_AUTH_DISABLED:
+            self.use_mock = True
+            logger.info("Voyage disabled for this process due to previous auth/config failure; using semantic mock")
+            return
         
         if self.api_key and voyageai is not None:
             try:
@@ -144,6 +162,8 @@ class VoyageEmbeddingsService:
             
             except Exception as e:
                 logger.warning(f"Voyage AI failed ({str(e)}), using semantic mock")
+                if 'invalid' in str(e).lower() or '401' in str(e):
+                    _VOYAGE_AUTH_DISABLED = True
                 self.use_mock = True
         
         # Fall back to semantic mock
@@ -199,6 +219,8 @@ class VoyageEmbeddingsService:
             
             except Exception as e:
                 logger.warning(f"Voyage AI batch failed ({str(e)}), using semantic mock")
+                if 'invalid' in str(e).lower() or '401' in str(e):
+                    _VOYAGE_AUTH_DISABLED = True
                 self.use_mock = True
         
         # Fall back to semantic mock
@@ -250,6 +272,8 @@ class VoyageEmbeddingsService:
             
             except Exception as e:
                 logger.warning(f"Voyage AI query failed ({str(e)}), using semantic mock")
+                if 'invalid' in str(e).lower() or '401' in str(e):
+                    _VOYAGE_AUTH_DISABLED = True
                 self.use_mock = True
         
         # Fall back to semantic mock

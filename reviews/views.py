@@ -194,9 +194,26 @@ class ReviewContractViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['get'], url_path='url')
     def presigned_url(self, request, pk=None):
         rc = self.get_object()
-        r2 = R2StorageService()
-        url = r2.generate_presigned_url(rc.r2_key, expiration=3600)
-        return Response({'success': True, 'url': url, 'expires_in': 3600}, status=status.HTTP_200_OK)
+        # Prefer API proxy URL so frontend does not hit R2 directly (avoids bucket CORS issues).
+        # Keep direct_url for debugging/migrations where needed.
+        proxy_url = request.build_absolute_uri(f"/api/v1/review-contracts/{rc.pk}/download/")
+        direct_url = None
+        try:
+            r2 = R2StorageService()
+            direct_url = r2.generate_presigned_url(rc.r2_key, expiration=3600)
+        except Exception:
+            direct_url = None
+
+        return Response(
+            {
+                'success': True,
+                'url': proxy_url,
+                'proxy_url': proxy_url,
+                'direct_url': direct_url,
+                'expires_in': 3600,
+            },
+            status=status.HTTP_200_OK,
+        )
 
     @action(detail=True, methods=['get'], url_path='download')
     def download(self, request, pk=None):

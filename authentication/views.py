@@ -4,6 +4,7 @@ Authentication views with real OTP implementation
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework import status
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
@@ -13,26 +14,33 @@ import secrets
 from datetime import timedelta
 from django.conf import settings
 from django.core.mail import send_mail
+from django.db import transaction
 from django.utils import timezone
 from .models import User
 from .otp_service import OTPService
+from .r2_service import R2StorageService
 from tenants.models import TenantModel
 
 from .openapi_serializers import (
     ForgotPasswordRequestSerializer,
+    AvatarResponseSerializer,
     GoogleLoginRequestSerializer,
     LoginRequestSerializer,
     LoginResponseSerializer,
     MessageResponseSerializer,
+    RequestEmailChangeSerializer,
     RefreshTokenRequestSerializer,
     RefreshTokenResponseSerializer,
     RegisterRequestSerializer,
     RegisterResponseSerializer,
     RequestOTPRequestSerializer,
+    UpdateProfileRequestSerializer,
+    UpdateProfileResponseSerializer,
     ResetPasswordRequestSerializer,
     UserContextSerializer,
     VerifyEmailOTPRequestSerializer,
     VerifyEmailOTPResponseSerializer,
+    VerifyEmailChangeSerializer,
     VerifyPasswordResetOTPRequestSerializer,
     VerifyPasswordResetOTPResponseSerializer,
 )
@@ -113,6 +121,108 @@ def _tenant_id_claim(user: User) -> str | None:
     return str(tenant_id) if tenant_id else None
 
 
+def _split_full_name(full_name: str) -> tuple[str, str]:
+    cleaned = ' '.join(str(full_name or '').split())
+    if not cleaned:
+        return '', ''
+    parts = cleaned.split(' ')
+    first_name = parts[0].strip()
+    last_name = ' '.join(parts[1:]).strip() if len(parts) > 1 else ''
+    return first_name, last_name
+
+
+def _get_auth_user(request) -> User:
+    request_user = getattr(request, 'user', None)
+    if isinstance(request_user, User):
+        return request_user
+
+    user_id = getattr(request_user, 'user_id', None) or getattr(request_user, 'pk', None)
+    if not user_id:
+        raise User.DoesNotExist
+
+    return User.objects.get(user_id=str(user_id))
+
+
+def _avatar_url_for_user(user: User):
+    avatar_key = (getattr(user, 'avatar_r2_key', None) or '').strip()
+    if not avatar_key:
+        return None
+
+    try:
+        return R2StorageService().generate_presigned_url(avatar_key, expiration=3600)
+    except Exception as exc:
+        logger.warning('Unable to generate avatar URL for %s: %s', getattr(user, 'email', None), exc)
+        return None
+
+
+def _serialize_user_context(user: User) -> dict:
+    tenant_id = _tenant_id_claim(user)
+    is_admin = bool(getattr(user, 'is_admin', False) or getattr(user, 'is_staff', False) or getattr(user, 'is_superuser', False))
+    is_superadmin = bool(getattr(user, 'is_superadmin', False) or getattr(user, 'is_superuser', False))
+    first_name = getattr(user, 'first_name', '') or ''
+    last_name = getattr(user, 'last_name', '') or ''
+    full_name = getattr(user, 'full_name', None) or ' '.join(part for part in [first_name.strip(), last_name.strip()] if part).strip()
+
+    return {
+        'user_id': str(getattr(user, 'user_id', None) or getattr(user, 'pk', None) or ''),
+        'email': getattr(user, 'email', None),
+        'full_name': full_name,
+        'first_name': first_name,
+        'last_name': last_name,
+        'tenant_id': tenant_id,
+        'avatar_url': _avatar_url_for_user(user),
+        'pending_email': getattr(user, 'pending_email', None),
+        'is_admin': is_admin,
+        'is_superadmin': is_superadmin,
+    }
+
+
+def _build_auth_response(user: User) -> dict:
+    refresh = RefreshToken.for_user(user)
+    is_admin = bool(user.is_staff or user.is_superuser)
+    is_superadmin = bool(user.is_superuser)
+    tenant_id = _tenant_id_claim(user)
+
+    refresh['email'] = user.email
+    refresh['tenant_id'] = tenant_id
+    refresh['is_admin'] = is_admin
+    refresh['is_superadmin'] = is_superadmin
+
+    access = refresh.access_token
+    access['email'] = user.email
+    access['tenant_id'] = tenant_id
+    access['is_admin'] = is_admin
+    access['is_superadmin'] = is_superadmin
+
+    return {
+        'access': str(access),
+        'refresh': str(refresh),
+        'user': _serialize_user_context(user),
+    }
+
+
+def _clear_pending_email_change(user: User):
+    user.pending_email = None
+    user.pending_email_otp = None
+    user.pending_email_otp_created_at = None
+    user.pending_email_otp_attempts = 0
+
+
+def _propagate_email_change(old_email: str, new_email: str) -> None:
+    old_email = str(old_email or '').strip().lower()
+    new_email = str(new_email or '').strip().lower()
+    if not old_email or not new_email or old_email == new_email:
+        return
+
+    try:
+        from contracts.models import TemplateFile
+
+        TemplateFile.objects.filter(created_by_email__iexact=old_email).update(created_by_email=new_email)
+        TemplateFile.objects.filter(signature_fields_updated_by_email__iexact=old_email).update(signature_fields_updated_by_email=new_email)
+    except Exception as exc:
+        logger.warning('Profile email propagation skipped for %s -> %s: %s', old_email, new_email, exc)
+
+
 class TokenView(APIView):
     """POST /api/auth/login/ - Authenticate user and generate JWT token"""
     permission_classes = [AllowAny]
@@ -153,35 +263,12 @@ class TokenView(APIView):
             )
 
         _bootstrap_admin_if_enabled(user)
-        
-        refresh = RefreshToken.for_user(user)
-        # Embed commonly needed claims so downstream requests don't require a DB lookup.
-        is_admin = bool(user.is_staff or user.is_superuser)
-        is_superadmin = bool(user.is_superuser)
-        tenant_id = _tenant_id_claim(user)
-        refresh['email'] = user.email
-        refresh['tenant_id'] = tenant_id
-        refresh['is_admin'] = is_admin
-        refresh['is_superadmin'] = is_superadmin
-        access = refresh.access_token
-        access['email'] = user.email
-        access['tenant_id'] = tenant_id
-        access['is_admin'] = is_admin
-        access['is_superadmin'] = is_superadmin
+
+        auth_payload = _build_auth_response(user)
         user.last_login = timezone.now()
         user.save(update_fields=['last_login'])
-        
-        return Response({
-            'access': str(access),
-            'refresh': str(refresh),
-            'user': {
-                'user_id': str(user.user_id),
-                'email': user.email,
-                'tenant_id': tenant_id,
-                'is_admin': is_admin,
-                'is_superadmin': is_superadmin,
-            }
-        }, status=status.HTTP_200_OK)
+
+        return Response(auth_payload, status=status.HTTP_200_OK)
 
 
 class RegisterView(APIView):
@@ -247,9 +334,11 @@ class RegisterView(APIView):
             )
             tenant_id = tenant.id
 
+        first_name, last_name = _split_full_name(full_name)
         user = User(
             email=email,
-            first_name=full_name.split()[0] if full_name else '',
+            first_name=first_name,
+            last_name=last_name,
             tenant_id=tenant_id,
             is_active=False,
         )
@@ -286,27 +375,181 @@ class CurrentUserView(APIView):
     
     @extend_schema(responses={200: UserContextSerializer})
     def get(self, request):
-        user = request.user
-        # Works for both DB-backed User and stateless JWTClaimsUser.
-        user_id = getattr(user, 'user_id', None) or getattr(user, 'pk', None) or ''
-        email = getattr(user, 'email', None)
-        tenant_id = getattr(user, 'tenant_id', None)
-        is_admin = bool(
-            getattr(user, 'is_admin', False)
-            or getattr(user, 'is_staff', False)
-            or getattr(user, 'is_superuser', False)
-        )
-        is_superadmin = bool(
-            getattr(user, 'is_superadmin', False)
-            or getattr(user, 'is_superuser', False)
-        )
-        return Response({
-            'user_id': str(user_id),
-            'email': email,
-            'tenant_id': str(tenant_id) if tenant_id is not None else None,
-            'is_admin': is_admin,
-            'is_superadmin': is_superadmin,
-        }, status=status.HTTP_200_OK)
+        try:
+            user = _get_auth_user(request)
+        except User.DoesNotExist:
+            return Response({'error': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        return Response(_serialize_user_context(user), status=status.HTTP_200_OK)
+
+    @extend_schema(request=UpdateProfileRequestSerializer, responses={200: UpdateProfileResponseSerializer})
+    def patch(self, request):
+        try:
+            user = _get_auth_user(request)
+        except User.DoesNotExist:
+            return Response({'error': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        full_name = str(request.data.get('full_name', '') or '').strip()
+        first_name = str(request.data.get('first_name', '') or '').strip()
+        last_name = str(request.data.get('last_name', '') or '').strip()
+
+        if full_name:
+            first_name, last_name = _split_full_name(full_name)
+
+        if not full_name and not first_name and not last_name:
+            return Response({'error': 'Profile name required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        user.first_name = first_name
+        user.last_name = last_name
+        user.save(update_fields=['first_name', 'last_name'])
+        return Response({'message': 'Profile updated', 'user': _serialize_user_context(user)}, status=status.HTTP_200_OK)
+
+
+class RequestEmailChangeView(APIView):
+    """POST /api/auth/email-change/request/ - Start email change verification"""
+    permission_classes = [IsAuthenticated]
+    throttle_scope = 'auth'
+
+    @extend_schema(request=RequestEmailChangeSerializer, responses={200: MessageResponseSerializer})
+    def post(self, request):
+        try:
+            user = _get_auth_user(request)
+        except User.DoesNotExist:
+            return Response({'error': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        new_email = str(request.data.get('new_email', '') or '').strip().lower()
+        if not new_email:
+            return Response({'error': 'New email required'}, status=status.HTTP_400_BAD_REQUEST)
+        if new_email == (user.email or '').strip().lower():
+            return Response({'error': 'New email must be different from the current email'}, status=status.HTTP_400_BAD_REQUEST)
+        if User.objects.filter(email=new_email).exclude(user_id=user.user_id).exists():
+            return Response({'error': 'Email already in use'}, status=status.HTTP_400_BAD_REQUEST)
+
+        otp = OTPService.generate_otp()
+        user.pending_email = new_email
+        user.pending_email_otp = otp
+        user.pending_email_otp_created_at = timezone.now()
+        user.pending_email_otp_attempts = 0
+        user.save(update_fields=['pending_email', 'pending_email_otp', 'pending_email_otp_created_at', 'pending_email_otp_attempts'])
+
+        otp_result = OTPService.send_email_change_otp(user, new_email, otp)
+        if not otp_result.get('success'):
+            _clear_pending_email_change(user)
+            user.save(update_fields=['pending_email', 'pending_email_otp', 'pending_email_otp_created_at', 'pending_email_otp_attempts'])
+            return Response({'error': otp_result.get('message', 'Failed to send OTP')}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        return Response({'message': otp_result.get('message', 'OTP sent to new email')}, status=status.HTTP_200_OK)
+
+
+class VerifyEmailChangeView(APIView):
+    """POST /api/auth/email-change/verify/ - Confirm the new email with OTP"""
+    permission_classes = [IsAuthenticated]
+    throttle_scope = 'auth'
+
+    @extend_schema(request=VerifyEmailChangeSerializer, responses={200: LoginResponseSerializer})
+    def post(self, request):
+        try:
+            user = _get_auth_user(request)
+        except User.DoesNotExist:
+            return Response({'error': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        new_email = str(request.data.get('new_email', '') or '').strip().lower()
+        otp = str(request.data.get('otp', '') or '').strip()
+
+        if not new_email or not otp:
+            return Response({'error': 'New email and OTP required'}, status=status.HTTP_400_BAD_REQUEST)
+        if not user.pending_email or str(user.pending_email).strip().lower() != new_email:
+            return Response({'error': 'No pending email change for this address'}, status=status.HTTP_400_BAD_REQUEST)
+        if not user.pending_email_otp:
+            return Response({'error': 'Email change OTP not requested'}, status=status.HTTP_400_BAD_REQUEST)
+        if user.pending_email_otp_attempts >= OTPService.MAX_ATTEMPTS:
+            return Response({'error': 'Too many attempts. Please request a new email change OTP'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if user.pending_email_otp_created_at:
+            expiry_time = user.pending_email_otp_created_at + timedelta(minutes=OTPService.OTP_VALIDITY_MINUTES)
+            if timezone.now() > expiry_time:
+                return Response({'error': 'Email change OTP has expired'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if str(user.pending_email_otp).strip() != otp:
+            user.pending_email_otp_attempts += 1
+            user.save(update_fields=['pending_email_otp_attempts'])
+            remaining = max(0, OTPService.MAX_ATTEMPTS - user.pending_email_otp_attempts)
+            return Response({'error': f'Invalid OTP ({remaining} attempts remaining)'}, status=status.HTTP_400_BAD_REQUEST)
+
+        old_email = user.email
+        user.email = new_email
+        _clear_pending_email_change(user)
+        user.save(update_fields=['email', 'pending_email', 'pending_email_otp', 'pending_email_otp_created_at', 'pending_email_otp_attempts'])
+        _propagate_email_change(old_email, new_email)
+
+        return Response(_build_auth_response(user), status=status.HTTP_200_OK)
+
+
+class AvatarUploadView(APIView):
+    """POST /api/auth/avatar/ - Upload or replace profile avatar"""
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    @extend_schema(responses={200: AvatarResponseSerializer})
+    def post(self, request):
+        try:
+            user = _get_auth_user(request)
+        except User.DoesNotExist:
+            return Response({'error': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        avatar_file = request.FILES.get('avatar')
+        if not avatar_file:
+            return Response({'error': 'Avatar file required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        old_key = (getattr(user, 'avatar_r2_key', None) or '').strip() or None
+        safe_name = R2StorageService.sanitize_filename(getattr(avatar_file, 'name', '') or 'avatar')
+        key = f"{user.tenant_id}/avatars/{user.user_id}/{uuid.uuid4()}--{safe_name}"
+
+        try:
+            storage = R2StorageService()
+            uploaded_key = storage.put_bytes(
+                key,
+                avatar_file.read(),
+                content_type=getattr(avatar_file, 'content_type', None) or 'application/octet-stream',
+                metadata={
+                    'tenant_id': str(user.tenant_id),
+                    'user_id': str(user.user_id),
+                    'purpose': 'profile_avatar',
+                    'original_filename': safe_name,
+                },
+            )
+        except Exception as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        user.avatar_r2_key = uploaded_key
+        user.save(update_fields=['avatar_r2_key'])
+
+        if old_key and old_key != uploaded_key:
+            try:
+                storage.delete_file(old_key)
+            except Exception:
+                logger.warning('Failed to remove previous avatar object for user %s', user.user_id)
+
+        return Response({'message': 'Avatar updated', 'user': _serialize_user_context(user)}, status=status.HTTP_200_OK)
+
+    @extend_schema(responses={200: AvatarResponseSerializer})
+    def delete(self, request):
+        try:
+            user = _get_auth_user(request)
+        except User.DoesNotExist:
+            return Response({'error': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        old_key = (getattr(user, 'avatar_r2_key', None) or '').strip() or None
+        user.avatar_r2_key = None
+        user.save(update_fields=['avatar_r2_key'])
+
+        if old_key:
+            try:
+                R2StorageService().delete_file(old_key)
+            except Exception:
+                logger.warning('Failed to delete avatar object for user %s', user.user_id)
+
+        return Response({'message': 'Avatar removed', 'user': _serialize_user_context(user)}, status=status.HTTP_200_OK)
 
 
 class LogoutView(APIView):
@@ -389,33 +632,11 @@ class VerifyEmailOTPView(APIView):
                 OTPService.send_welcome_email(user)
 
             OTPService.clear_otp(user, 'login')
-            refresh = RefreshToken.for_user(user)
-            is_admin = bool(user.is_staff or user.is_superuser)
-            is_superadmin = bool(user.is_superuser)
-            tenant_id = _tenant_id_claim(user)
-            refresh['email'] = user.email
-            refresh['tenant_id'] = tenant_id
-            refresh['is_admin'] = is_admin
-            refresh['is_superadmin'] = is_superadmin
-            access = refresh.access_token
-            access['email'] = user.email
-            access['tenant_id'] = tenant_id
-            access['is_admin'] = is_admin
-            access['is_superadmin'] = is_superadmin
+            auth_payload = _build_auth_response(user)
             user.last_login = timezone.now()
             user.save(update_fields=['last_login'])
             
-            return Response({
-                'access': str(access),
-                'refresh': str(refresh),
-                'user': {
-                    'user_id': str(user.user_id),
-                    'email': user.email,
-                    'tenant_id': tenant_id,
-                    'is_admin': is_admin,
-                    'is_superadmin': is_superadmin,
-                }
-            }, status=status.HTTP_200_OK)
+            return Response(auth_payload, status=status.HTTP_200_OK)
         except User.DoesNotExist:
             return Response({'error': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -538,34 +759,16 @@ class GoogleLoginView(APIView):
 
         _bootstrap_admin_if_enabled(user)
 
-        refresh = RefreshToken.for_user(user)
-        is_admin = bool(user.is_staff or user.is_superuser)
-        is_superadmin = bool(user.is_superuser)
-        tenant_id = _tenant_id_claim(user)
-        refresh['email'] = user.email
-        refresh['tenant_id'] = tenant_id
-        refresh['is_admin'] = is_admin
-        refresh['is_superadmin'] = is_superadmin
-        access = refresh.access_token
-        access['email'] = user.email
-        access['tenant_id'] = tenant_id
-        access['is_admin'] = is_admin
-        access['is_superadmin'] = is_superadmin
+        auth_payload = _build_auth_response(user)
 
         user.last_login = timezone.now()
         user.save(update_fields=['last_login'])
 
         return Response(
             {
-                'access': str(access),
-                'refresh': str(refresh),
-                'user': {
-                    'user_id': str(user.user_id),
-                    'email': user.email,
-                    'tenant_id': tenant_id,
-                    'is_admin': is_admin,
-                    'is_superadmin': is_superadmin,
-                },
+                'access': auth_payload['access'],
+                'refresh': auth_payload['refresh'],
+                'user': auth_payload['user'],
             },
             status=status.HTTP_200_OK,
         )

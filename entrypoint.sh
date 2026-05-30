@@ -20,7 +20,7 @@ echo "[entrypoint] Starting gunicorn..."
 exec gunicorn \
   --bind "0.0.0.0:${PORT:-8080}" \
   --workers "${GUNICORN_WORKERS:-4}" \
-  --timeout "${GUNICORN_TIMEOUT:-60}" \
+  --timeout "${GUNICORN_TIMEOUT:-180}" \
   --access-logfile - \
   --error-logfile - \
   --log-level "${GUNICORN_LOG_LEVEL:-info}" \

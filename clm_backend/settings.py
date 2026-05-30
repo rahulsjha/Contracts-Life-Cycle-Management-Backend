@@ -388,6 +388,15 @@ REST_FRAMEWORK = {
     'PAGE_SIZE': 50,
 }
 
+# Local development convenience: when DEBUG is enabled and no DATABASE_URL is
+# provided, use a lightweight SQLite database so migrations and the dev server
+# can run without requiring an external Supabase/Postgres instance.
+if DEBUG and not DATABASE_URL:
+    DATABASES['default'] = {
+        'ENGINE': 'django.db.backends.sqlite3',
+        'NAME': str(BASE_DIR / 'db.sqlite3'),
+    }
+
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(hours=24),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
@@ -443,22 +452,31 @@ if not R2_ENDPOINT_URL and R2_ACCOUNT_ID:
 
 R2_PUBLIC_URL = os.getenv('R2_PUBLIC_URL', '')
 
-CORS_ALLOWED_ORIGINS = [
-    # Local Development
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "http://localhost:3001",
-    "http://127.0.0.1:3001",
-    "http://localhost:4000",
-    "http://127.0.0.1:4000",
-    "https://lawflow-267708864896.asia-south1.run.app",
-    "https://verdant-douhua-1148be.netlify.app",
-    "http://127.0.0.1:8000",
-    "https://lawflow.lawflow-dev.workers.dev",
-    "http://127.0.0.1:8000",
-    "http://localhost",
-    "http://127.0.0.1",
-]
+# Allow CORS from all origins if CORS_ALLOW_ALL is set
+_allow_cors_all = os.getenv('CORS_ALLOW_ALL', 'False').strip().lower() in ('1', 'true', 'yes', 'y', 'on')
+
+if _allow_cors_all:
+    CORS_ALLOW_ALL_ORIGINS = True
+    CORS_ALLOWED_ORIGINS = []
+else:
+    CORS_ALLOW_ALL_ORIGINS = False
+    CORS_ALLOWED_ORIGINS = [
+        # Local Development
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
+        "http://localhost:4000",
+        "http://127.0.0.1:4000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "https://lawflow-267708864896.asia-south1.run.app",
+        "https://verdant-douhua-1148be.netlify.app",
+        "http://127.0.0.1:8000",
+        "https://lawflow.lawflow-dev.workers.dev",
+        "http://localhost",
+        "http://127.0.0.1",
+    ]
 
 
 def _normalize_cors_origin(origin: str) -> str | None:
@@ -484,19 +502,21 @@ def _normalize_cors_origin(origin: str) -> str | None:
 
 
 # Normalize hard-coded origins (defensive; avoids accidental paths).
-_normalized = []
-for _o in CORS_ALLOWED_ORIGINS:
-    _n = _normalize_cors_origin(_o)
-    if _n and _n not in _normalized:
-        _normalized.append(_n)
-CORS_ALLOWED_ORIGINS = _normalized
+# Skip normalization if CORS allows all origins
+if not CORS_ALLOW_ALL_ORIGINS:
+    _normalized = []
+    for _o in CORS_ALLOWED_ORIGINS:
+        _n = _normalize_cors_origin(_o)
+        if _n and _n not in _normalized:
+            _normalized.append(_n)
+    CORS_ALLOWED_ORIGINS = _normalized
 
-_cors_extra = os.getenv('CORS_ALLOWED_ORIGINS_EXTRA', '').strip()
-if _cors_extra:
-    for _origin in [o.strip() for o in _cors_extra.split(',') if o.strip()]:
-        _normalized_origin = _normalize_cors_origin(_origin)
-        if _normalized_origin and _normalized_origin not in CORS_ALLOWED_ORIGINS:
-            CORS_ALLOWED_ORIGINS.append(_normalized_origin)
+    _cors_extra = os.getenv('CORS_ALLOWED_ORIGINS_EXTRA', '').strip()
+    if _cors_extra:
+        for _origin in [o.strip() for o in _cors_extra.split(',') if o.strip()]:
+            _normalized_origin = _normalize_cors_origin(_origin)
+            if _normalized_origin and _normalized_origin not in CORS_ALLOWED_ORIGINS:
+                CORS_ALLOWED_ORIGINS.append(_normalized_origin)
 
 
 CORS_ALLOW_CREDENTIALS = True
@@ -519,11 +539,7 @@ CORS_ALLOW_HEADERS = [
     'x-tenant',
 ]
 
-# Optional: allow all origins (useful for temporary debugging only).
-# With CORS_ALLOW_CREDENTIALS=True, django-cors-headers will echo the request Origin.
-CORS_ALLOW_ALL_ORIGINS = os.getenv('CORS_ALLOW_ALL_ORIGINS', 'False').strip().lower() in (
-    '1', 'true', 'yes', 'y', 'on'
-)
+# Note: CORS_ALLOW_ALL_ORIGINS is set above based on CORS_ALLOW_ALL env var
 
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '')
 VOYAGE_API_KEY = os.getenv('VOYAGE_API_KEY', '')

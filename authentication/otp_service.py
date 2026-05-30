@@ -170,6 +170,43 @@ CLM Team
             logger.error(f"Error sending email OTP to {email}: {str(e)}")
             print(f"Error sending email OTP: {e}")
             return {'message': f'Error sending OTP: {str(e)}', 'success': False}
+
+    @staticmethod
+    def send_email_change_otp(user, new_email, otp):
+        """Send OTP for changing the account email address."""
+        try:
+            subject = "Confirm your CLM email change"
+            message = f"""
+Hello {user.first_name or user.email},
+
+You requested to change your CLM account email to:
+
+{new_email}
+
+Your verification code is:
+
+{otp}
+
+This OTP is valid for {OTPService.OTP_VALIDITY_MINUTES} minutes.
+
+If you did not request this change, you can safely ignore this email.
+
+Best regards,
+CLM Team
+            """
+
+            result = send_mail(
+                subject,
+                message,
+                settings.DEFAULT_FROM_EMAIL,
+                [new_email],
+                fail_silently=False,
+            )
+            logger.info(f"Email change OTP sent to {new_email}, result: {result}")
+            return {'message': f'OTP sent to {new_email}. Valid for {OTPService.OTP_VALIDITY_MINUTES} minutes', 'success': True}
+        except Exception as e:
+            logger.error(f"Error sending email change OTP to {new_email}: {str(e)}")
+            return {'message': f'Error sending OTP: {str(e)}', 'success': False}
     
     @staticmethod
     def verify_otp(user, otp, otp_type='login'):
