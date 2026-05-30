@@ -278,17 +278,28 @@ DATABASES = {
             'keepalives_interval': int(os.getenv('DB_KEEPALIVES_INTERVAL', '10')),
             'keepalives_count': int(os.getenv('DB_KEEPALIVES_COUNT', '5')),
             # Server-side timeouts (ms)
-                'options': os.getenv('DB_PG_OPTIONS', '-c statement_timeout=120000 -c idle_in_transaction_session_timeout=120000'),
-            },
-            'TEST': {
-                # Use a stable Supabase test DB name; run tests with --keepdb.
-                'NAME': os.getenv('DB_TEST_NAME', 'test_postgres'),
-                # Default to running migrations so extensions required by models (pgvector/pg_trgm)
-                # are available during test database creation.
-                'MIGRATE': os.getenv('DB_TEST_MIGRATE', 'true').strip().lower() in ('1', 'true', 'yes', 'y', 'on'),
-            },
-        }
+            'options': os.getenv('DB_PG_OPTIONS', '-c statement_timeout=120000 -c idle_in_transaction_session_timeout=120000'),
+        },
+        'TEST': {
+            # Use a stable Supabase test DB name; run tests with --keepdb.
+            'NAME': os.getenv('DB_TEST_NAME', 'test_postgres'),
+            # Default to running migrations so extensions required by models (pgvector/pg_trgm)
+            # are available during test database creation.
+            'MIGRATE': os.getenv('DB_TEST_MIGRATE', 'true').strip().lower() in ('1', 'true', 'yes', 'y', 'on'),
+        },
     }
+}
+
+USE_REMOTE_DB = os.getenv('USE_REMOTE_DB', '').strip().lower() in ('1', 'true', 'yes', 'y', 'on')
+USE_LOCAL_SQLITE = not USE_REMOTE_DB
+
+if USE_LOCAL_SQLITE:
+    DATABASES['default'] = {
+        'ENGINE': 'django.db.backends.sqlite3',
+        'NAME': BASE_DIR / 'db.sqlite3',
+    }
+elif DATABASE_URL:
+    DATABASES['default'] = _parse_database_url(DATABASE_URL)
 
 # Tests against Supabase should not keep long-lived connections open.
 # Persistent connections can prevent the test database from being dropped.
@@ -302,11 +313,6 @@ if any(arg == 'test' for arg in sys.argv):
     # Dropping the test DB can become flaky; keepdb avoids noisy failures.
     TEST_RUNNER = 'clm_backend.test_runner.SupabaseKeepdbTestRunner'
 
-# If a single DATABASE_URL is provided, it takes precedence.
-if DATABASE_URL:
-    DATABASES['default'] = _parse_database_url(DATABASE_URL)
-
-
 def _is_supabase_db_host(host: str) -> bool:
     h = (host or '').strip().lower()
     if not h:
@@ -314,11 +320,11 @@ def _is_supabase_db_host(host: str) -> bool:
     return h.endswith('.supabase.co') or h.endswith('.supabase.com') or 'pooler.supabase.com' in h
 
 
-# Enforce "Supabase-only" DB connectivity.
-# This project is intended to run against Supabase Postgres (direct or pooler),
-# not a generic/local Postgres instance.
+# Enforce "Supabase-only" DB connectivity on the remote database path.
+# Local debug runs are allowed to use SQLite so the project can start without
+# requiring Supabase credentials or network access.
 SUPABASE_ONLY = os.getenv('SUPABASE_ONLY', 'True').strip().lower() in ('1', 'true', 'yes', 'y', 'on')
-if SUPABASE_ONLY:
+if SUPABASE_ONLY and not USE_LOCAL_SQLITE:
     _db = DATABASES.get('default', {})
     _engine = (_db.get('ENGINE') or '').strip().lower()
     _host = (_db.get('HOST') or '').strip()

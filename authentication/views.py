@@ -530,7 +530,34 @@ class AvatarUploadView(APIView):
             except Exception:
                 logger.warning('Failed to remove previous avatar object for user %s', user.user_id)
 
-        return Response({'message': 'Avatar updated', 'user': _serialize_user_context(user)}, status=status.HTTP_200_OK)
+        # Optionally handle inline email change request in the same endpoint.
+        new_email = str(request.data.get('new_email', '') or '').strip().lower()
+        email_otp_result = None
+        if new_email:
+            # Validate new email
+            if new_email == (user.email or '').strip().lower():
+                email_otp_result = {'success': False, 'message': 'New email must be different from current email'}
+            elif User.objects.filter(email=new_email).exclude(user_id=user.user_id).exists():
+                email_otp_result = {'success': False, 'message': 'Email already in use'}
+            else:
+                otp = OTPService.generate_otp()
+                user.pending_email = new_email
+                user.pending_email_otp = otp
+                user.pending_email_otp_created_at = timezone.now()
+                user.pending_email_otp_attempts = 0
+                user.save(update_fields=['pending_email', 'pending_email_otp', 'pending_email_otp_created_at', 'pending_email_otp_attempts'])
+
+                email_otp_result = OTPService.send_email_change_otp(user, new_email, otp)
+                if not email_otp_result.get('success'):
+                    # clear pending if send failed
+                    _clear_pending_email_change(user)
+                    user.save(update_fields=['pending_email', 'pending_email_otp', 'pending_email_otp_created_at', 'pending_email_otp_attempts'])
+
+        resp = {'message': 'Avatar updated', 'user': _serialize_user_context(user)}
+        if email_otp_result is not None:
+            resp['email_change'] = email_otp_result
+
+        return Response(resp, status=status.HTTP_200_OK)
 
     @extend_schema(responses={200: AvatarResponseSerializer})
     def delete(self, request):

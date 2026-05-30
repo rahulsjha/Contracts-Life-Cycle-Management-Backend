@@ -1,4 +1,4 @@
-#!/Users/vishaljha/Desktop/CLM/Contracts-Life-Cycle-Management-Backend/.venv/bin/python3
+#!/Users/vishaljha/Desktop/CLM/Contracts-Life-Cycle-Management-Backend/.venv/bin/python
 
 import sys
 import json
