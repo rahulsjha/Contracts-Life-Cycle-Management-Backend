@@ -607,6 +607,13 @@ class AvatarUploadView(APIView):
             return Response({'error': 'Avatar file required'}, status=status.HTTP_400_BAD_REQUEST)
 
         old_key = (getattr(user, 'avatar_r2_key', None) or '').strip() or None
+        previous_image_keys = []
+        for item in (getattr(user, 'images', None) or []):
+            if not isinstance(item, dict):
+                continue
+            r2_key = str(item.get('r2_key') or '').strip()
+            if r2_key:
+                previous_image_keys.append(r2_key)
         safe_name = R2StorageService.sanitize_filename(getattr(avatar_file, 'name', '') or 'avatar')
         key = f"{user.tenant_id}/avatars/{user.user_id}/{uuid.uuid4()}--{safe_name}"
 
@@ -627,33 +634,28 @@ class AvatarUploadView(APIView):
             return Response({'error': str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
         user.avatar_r2_key = uploaded_key
-        # If request asks to store image in the user's images storage, append metadata.
-        add_to_images_raw = request.data.get('add_to_images', '')
-        add_to_images = str(add_to_images_raw).strip().lower() in ('1', 'true', 'yes', 'y')
         purpose = str(request.data.get('purpose', '') or '').strip() or 'user_uploaded'
 
-        if add_to_images:
-            try:
-                current_images = getattr(user, 'images', None) or []
-                entry = {
-                    'r2_key': uploaded_key,
-                    'purpose': purpose,
-                    'uploaded_at': timezone.now().isoformat(),
-                }
-                current_images.append(entry)
-                user.images = current_images
-                user.save(update_fields=['avatar_r2_key', 'images'])
-            except Exception:
-                # Fallback: still save avatar key
-                user.save(update_fields=['avatar_r2_key'])
-        else:
-            user.save(update_fields=['avatar_r2_key'])
+        entry = {
+            'r2_key': uploaded_key,
+            'purpose': purpose,
+            'uploaded_at': timezone.now().isoformat(),
+        }
+        user.images = [entry]
+        user.save(update_fields=['avatar_r2_key', 'images'])
 
         if old_key and old_key != uploaded_key:
             try:
                 storage.delete_file(old_key)
             except Exception:
                 logger.warning('Failed to remove previous avatar object for user %s', user.user_id)
+
+        for prior_key in previous_image_keys:
+            if prior_key and prior_key != uploaded_key and prior_key != old_key:
+                try:
+                    storage.delete_file(prior_key)
+                except Exception:
+                    logger.warning('Failed to remove previous profile image object %s for user %s', prior_key, user.user_id)
 
         # Optionally handle inline email change request in the same endpoint.
         new_email = str(request.data.get('new_email', '') or '').strip().lower()
