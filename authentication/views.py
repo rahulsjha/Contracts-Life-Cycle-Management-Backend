@@ -231,6 +231,28 @@ def _serialize_user_context(user: User, request=None) -> dict:
     except Exception:
         images_list = []
 
+    # Populate tenant/company details when available.
+    company_id = None
+    company_name = None
+    company_gst = None
+    company_cin = None
+    company_registered_address = None
+    try:
+        if getattr(user, 'tenant_id', None):
+            tenant = TenantModel.objects.filter(id=getattr(user, 'tenant_id')).first()
+            if tenant:
+                company_id = str(tenant.id)
+                company_name = tenant.name
+                company_gst = getattr(tenant, 'gst_number', None)
+                company_cin = getattr(tenant, 'registration_number', None)
+                company_registered_address = getattr(tenant, 'registered_address', None)
+    except Exception:
+        company_id = None
+        company_name = None
+        company_gst = None
+        company_cin = None
+        company_registered_address = None
+
     return {
         'user_id': str(getattr(user, 'user_id', None) or getattr(user, 'pk', None) or ''),
         'email': getattr(user, 'email', None),
@@ -238,6 +260,11 @@ def _serialize_user_context(user: User, request=None) -> dict:
         'first_name': first_name,
         'last_name': last_name,
         'tenant_id': tenant_id,
+        'company_id': company_id,
+        'company_name': company_name,
+        'company_gst_number': company_gst,
+        'company_cin': company_cin,
+        'company_registered_address': company_registered_address,
         'avatar_url': _avatar_url_for_user(user, request=request),
         'images': images_list,
         'pending_email': getattr(user, 'pending_email', None),
@@ -431,11 +458,19 @@ class RegisterView(APIView):
             while TenantModel.objects.filter(domain=domain).exists():
                 suffix += 1
                 domain = f"{base_domain}-{suffix}"
+            # Accept optional company identifiers from registration request
+            company_gst = request.data.get('company_gst_number', '').strip()
+            company_cin = request.data.get('company_cin', '').strip()
+            company_registered_address = request.data.get('company_registered_address', '').strip()
+
             tenant = TenantModel.objects.create(
                 name=f"Tenant {domain}",
                 domain=domain,
                 status='active',
                 subscription_plan='free',
+                gst_number=company_gst or None,
+                registration_number=company_cin or None,
+                registered_address=company_registered_address or None,
             )
             tenant_id = tenant.id
 
