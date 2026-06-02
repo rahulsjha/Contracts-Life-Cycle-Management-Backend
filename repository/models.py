@@ -1,5 +1,4 @@
 from django.db import models
-from django.contrib.postgres.fields import ArrayField
 from tenants.models import TenantModel
 from authentication.models import User
 import uuid
@@ -99,7 +98,7 @@ class DocumentChunk(models.Model):
     text = models.TextField()
     start_char_index = models.IntegerField()
     end_char_index = models.IntegerField()
-    embedding = ArrayField(models.FloatField(), null=True, blank=True)
+    embedding = models.JSONField(null=True, blank=True)
     is_processed = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     
@@ -122,7 +121,7 @@ class DocumentMetadata(models.Model):
     tenant = models.ForeignKey(TenantModel, on_delete=models.CASCADE)
     
     # Extracted Fields
-    parties = ArrayField(models.CharField(max_length=500), default=list, blank=True)
+    parties = models.JSONField(default=list, blank=True)
     contract_value = models.DecimalField(max_digits=15, decimal_places=2, null=True, blank=True)
     currency = models.CharField(max_length=10, null=True, blank=True)
     
@@ -131,12 +130,12 @@ class DocumentMetadata(models.Model):
     expiration_date = models.DateField(null=True, blank=True)
     
     # Clauses and Obligations
-    identified_clauses = ArrayField(models.CharField(max_length=100), default=list, blank=True)
+    identified_clauses = models.JSONField(default=list, blank=True)
     obligations = models.JSONField(default=list, blank=True)
     
     # Risk Assessment
     risk_score = models.IntegerField(null=True, blank=True)  # 0-100
-    high_risk_items = ArrayField(models.CharField(max_length=500), default=list, blank=True)
+    high_risk_items = models.JSONField(default=list, blank=True)
     
     # Summary
     summary = models.TextField(null=True, blank=True)

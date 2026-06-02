@@ -3,8 +3,6 @@ from django.contrib.postgres.search import SearchVectorField
 from django.contrib.postgres.indexes import GinIndex
 import uuid
 
-from pgvector.django import VectorField
-
 
 class SearchIndexModel(models.Model):
     """
@@ -35,7 +33,7 @@ class SearchIndexModel(models.Model):
     search_vector = SearchVectorField(null=True, blank=True)
     
     # Semantic embedding (for pgvector - optional)
-    embedding = VectorField(dimensions=1024, null=True, blank=True)
+    embedding = models.JSONField(null=True, blank=True)
     
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at = models.DateTimeField(auto_now=True)

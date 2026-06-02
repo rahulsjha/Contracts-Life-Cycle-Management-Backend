@@ -2,8 +2,7 @@
 
 import django.contrib.postgres.indexes
 from django.db import migrations
-
-from pgvector.django import VectorField
+from django.db import models
 
 
 class Migration(migrations.Migration):
@@ -12,19 +11,10 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.RunSQL(
-            sql="CREATE EXTENSION IF NOT EXISTS vector;",
-            reverse_sql=migrations.RunSQL.noop,
-        ),
-        migrations.RunSQL(
-            sql="CREATE EXTENSION IF NOT EXISTS pg_trgm;",
-            reverse_sql=migrations.RunSQL.noop,
-        ),
-
         migrations.AddField(
             model_name="searchindexmodel",
             name="embedding",
-            field=VectorField(blank=True, dimensions=1024, null=True),
+            field=models.JSONField(blank=True, null=True),
         ),
 
         migrations.AddIndex(
