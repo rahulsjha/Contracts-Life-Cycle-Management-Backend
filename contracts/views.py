@@ -2851,6 +2851,61 @@ Relevant clause library (optional):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+    @action(detail=True, methods=['post'], url_path='generate-document')
+    def generate_document(self, request, pk=None):
+        """POST /contracts/{id}/generate-document/ - Generate document from editor content."""
+        contract = self.get_object()
+        try:
+            from django.db.models import Max
+            editor_r2_key = self._editor_content_r2_key_for_contract_id(contract.id)
+            editor_content = self._get_editor_snapshot_from_r2(editor_r2_key)
+            if not editor_content:
+                md = contract.metadata or {}
+                rendered_text = md.get('rendered_text', '')
+                rendered_html = md.get('rendered_html', '')
+                if not rendered_text and not rendered_html:
+                    return Response({'error': 'No content. Edit the contract first.'}, status=status.HTTP_400_BAD_REQUEST)
+                editor_content = {'rendered_text': rendered_text, 'rendered_html': rendered_html}
+            
+            last_version = contract.versions.aggregate(max_version=Max('version_number'))['max_version'] or 0
+            next_version = max(1, last_version + 1)
+            document_data = {
+                'schema': 'clm.contract_document.v1',
+                'contract_id': str(contract.id),
+                'contract_title': contract.title,
+                'contract_type': contract.contract_type,
+                'version': next_version,
+                'created_at': timezone.now().isoformat(),
+                'created_by': str(request.user.user_id),
+                'rendered_text': editor_content.get('rendered_text', ''),
+                'rendered_html': editor_content.get('rendered_html', ''),
+            }
+            doc_json = json.dumps(document_data, ensure_ascii=False, indent=2)
+            doc_bytes = doc_json.encode('utf-8')
+            r2_service = R2StorageService()
+            filename = f"{contract.title.replace(' ', '_')}_v{next_version}.json"
+            r2_key = f"{request.user.tenant_id}/contracts/{contract.id}/documents/{filename}"
+            r2_service.put_file(r2_key, doc_bytes, content_type='application/json')
+            file_hash = hashlib.sha256(doc_bytes).hexdigest()
+            ContractVersion.objects.create(
+                contract=contract,
+                version_number=next_version,
+                r2_key=r2_key,
+                template_id=contract.template_id or uuid.uuid4(),
+                template_version=getattr(contract.template, 'version', None) or 1,
+                change_summary='Generated from editor content',
+                created_by=request.user.user_id,
+                file_size=len(doc_bytes),
+                file_hash=file_hash,
+            )
+            contract.current_version = next_version
+            contract.save(update_fields=['current_version'])
+            download_url = r2_service.generate_presigned_url(r2_key)
+            return Response({'contract_id': str(contract.id), 'version_number': next_version, 'r2_key': r2_key, 'download_url': download_url}, status=status.HTTP_201_CREATED)
+        except Exception as e:
+            logger.exception(f'Failed to generate document {pk}: {e}')
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 
 class GenerationJobViewSet(viewsets.ModelViewSet):
     """
