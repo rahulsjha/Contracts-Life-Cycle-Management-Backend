@@ -19,7 +19,7 @@ from authentication.r2_service import R2StorageService
 
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # 25MB
-ALLOWED_EXTENSIONS = {"pdf", "txt"}
+ALLOWED_EXTENSIONS = {"pdf", "txt", "docx", "md"}
 
 
 def _get_user_ids(request) -> Dict[str, Optional[str]]:
@@ -112,7 +112,7 @@ class PrivateUploadsView(APIView):
         ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
         if ext not in ALLOWED_EXTENSIONS:
             return Response(
-                {"success": False, "error": "Only .pdf and .txt files are supported."},
+                {"success": False, "error": "Only .pdf, .txt and .docx files are supported."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 

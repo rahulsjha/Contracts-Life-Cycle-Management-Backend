@@ -267,27 +267,23 @@ class R2StorageService:
         except ClientError as e:
             raise Exception(f"Failed to list objects: {str(e)}")
     
-    def generate_presigned_url(self, r2_key, expiration=3600):
+    def generate_presigned_url(self, r2_key, expiration=3600, force_presigned=True):
         """
-        Generate a presigned URL for secure file access
+        Generate a presigned URL for secure file access.
         
         Args:
             r2_key: The R2 key (path) of the file
             expiration: URL expiration time in seconds (default: 1 hour)
+            force_presigned: If True (default), skip public URL logic and generate a secure presigned URL.
         
         Returns:
-            str: Presigned URL
+            str: Secure URL
         """
-        # If a public base URL is configured, return a stable public URL (no expiry).
-        public_base = getattr(settings, 'R2_PUBLIC_URL', '') or getattr(settings, 'R2_PUBLIC_BASE_URL', '')
-        if public_base:
-            public_base = public_base.rstrip('/')
-            # Many deployments expose the bucket under the public base URL using the pattern:
-            # {R2_PUBLIC_URL}/{bucket}/{key} or sometimes {R2_PUBLIC_URL}/{key} depending on setup.
-            # Try the common pattern first including bucket name.
-            try:
-                return f"{public_base}/{self.bucket_name}/{r2_key}"
-            except Exception:
+        if not force_presigned:
+            # If a public base URL is configured, return a stable public URL (no expiry).
+            public_base = getattr(settings, 'R2_PUBLIC_URL', '') or getattr(settings, 'R2_PUBLIC_BASE_URL', '')
+            if public_base:
+                public_base = public_base.rstrip('/')
                 return f"{public_base}/{r2_key}"
 
         try:
